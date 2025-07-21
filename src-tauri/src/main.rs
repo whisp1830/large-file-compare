@@ -4,6 +4,8 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
+
+const BUFFER_SIZE: usize = 128 * 1024; // 128 KB
 use std::thread;
 use ahash::AHasher;
 use std::hash::Hasher;
@@ -58,9 +60,9 @@ fn run_comparison(
 ) -> Result<(), std::io::Error> {
     // --- Step 1: Read File A and build the hash map ---
     let file_a = File::open(&file_a_path)?;
-    let file_a_metadata = file_a.metadata()?;
-    let file_a_size = file_a_metadata.len();
-    let mut reader_a = BufReader::new(file_a);
+        let file_a_metadata = file_a.metadata()?;
+        let file_a_size = file_a_metadata.len();
+        let mut reader_a = BufReader::with_capacity(BUFFER_SIZE, file_a);
     
     let mut line_hashes: HashMap<u64, (String, usize)> = HashMap::new();
     let mut bytes_read_a: u64 = 0;
@@ -86,9 +88,9 @@ fn run_comparison(
 
     // --- Step 2: Read File B and compare ---
     let file_b = File::open(&file_b_path)?;
-    let file_b_metadata = file_b.metadata()?;
-    let file_b_size = file_b_metadata.len();
-    let mut reader_b = BufReader::new(file_b);
+        let file_b_metadata = file_b.metadata()?;
+        let file_b_size = file_b_metadata.len();
+        let mut reader_b = BufReader::with_capacity(BUFFER_SIZE, file_b);
     
     let mut unique_to_b: Vec<String> = Vec::new();
     let mut bytes_read_b: u64 = 0;
