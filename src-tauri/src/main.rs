@@ -4,13 +4,15 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
-
-const BUFFER_SIZE: usize = 128 * 1024; // 128 KB
 use std::thread;
 use ahash::AHasher;
 use std::hash::Hasher;
+use memmap2::Mmap;
+use std::io::Error as IoError;
 
 use tauri::{AppHandle, Emitter};
+
+const BUFFER_SIZE: usize = 1024 * 1024; // 1MB
 
 // --- Data Structures for Frontend Communication ---
 
@@ -32,6 +34,69 @@ fn hash_line(line: &str) -> u64 {
     let mut hasher = AHasher::default();
     hasher.write(line.as_bytes());
     hasher.finish()
+}
+
+fn process_file_with_mmap(
+    app: &AppHandle,
+    file_path: &str,
+    progress_file_id: &str,
+) -> Result<HashMap<u64, (String, usize)>, IoError> {
+
+    let file = File::open(file_path)?;
+    let file_size = file.metadata()?.len();
+    if file_size == 0 {
+        return Ok(HashMap::new());
+    }
+
+    // SAFETY: 我们假设在程序读取期间文件不会被外部修改。
+    // 对于只读操作这是个合理的假设。
+    let mmap = unsafe { Mmap::map(&file)? };
+
+    let estimated_lines = (file_size / 50).max(1024) as usize;
+    let mut line_hashes: HashMap<u64, (String, usize)> = HashMap::with_capacity(estimated_lines);
+
+    let mut bytes_processed: u64 = 0;
+    let mut last_emitted_percentage: f64 = -1.0;
+
+    // 直接在内存映射的字节切片上按换行符分割
+    for line_bytes in mmap.split(|&b| b == b'\n') {
+        // 更新处理进度
+        bytes_processed += line_bytes.len() as u64 + 1; // +1 for the newline character
+
+        // 跳过空行
+        if line_bytes.is_empty() {
+            continue;
+        }
+
+        // 处理行尾可能存在的 '\r'
+        let line_bytes = if line_bytes.last() == Some(&b'\r') {
+            &line_bytes[..line_bytes.len() - 1]
+        } else {
+            line_bytes
+        };
+
+        // 尝试将字节转换为 &str，如果文件不是有效的 UTF-8 可能会失败
+        if let Ok(line_str) = std::str::from_utf8(line_bytes) {
+            let hash = hash_line(line_str);
+            line_hashes
+                .entry(hash)
+                .and_modify(|e| e.1 += 1)
+                .or_insert_with(|| (line_str.to_string(), 1));
+        } else {
+            // 你可以在这里处理非 UTF-8 行，例如跳过或记录错误
+        }
+
+        // 发送进度更新 (逻辑保持不变)
+        let percentage = (bytes_processed as f64 / file_size as f64) * 100.0;
+        if percentage - last_emitted_percentage >= 3.0 || percentage >= 99.9 {
+            if let Err(e) = app.emit("progress", ProgressPayload { percentage, file: progress_file_id.to_string() }) {
+                eprintln!("Failed to emit progress for File {}: {}", progress_file_id, e);
+            }
+            last_emitted_percentage = percentage;
+        }
+    }
+
+    Ok(line_hashes)
 }
 
 // --- Tauri Command ---
@@ -58,75 +123,46 @@ fn run_comparison(
     file_a_path: String,
     file_b_path: String,
 ) -> Result<(), std::io::Error> {
-    // --- Step 1: Read File A and build the hash map ---
-    let file_a = File::open(&file_a_path)?;
-        let file_a_metadata = file_a.metadata()?;
-        let file_a_size = file_a_metadata.len();
-        let mut reader_a = BufReader::with_capacity(BUFFER_SIZE, file_a);
-    
-    let mut line_hashes: HashMap<u64, (String, usize)> = HashMap::new();
-    let mut bytes_read_a: u64 = 0;
-    let mut line = String::new();
-    let mut last_emitted_percentage_a: f64 = -1.0;
 
-    while reader_a.read_line(&mut line)? > 0 {
-        bytes_read_a += line.len() as u64;
-        let trimmed_line = line.trim_end().to_string();
-        let hash = hash_line(&trimmed_line);
-        line_hashes.entry(hash).and_modify(|e| e.1 += 1).or_insert((trimmed_line, 1));
-        line.clear();
+    // --- Step 1: 并行处理两个文件 ---
+    let app_a = app.clone();
+    let handle_a = thread::spawn(move || {
+        process_file_with_mmap(&app_a, &file_a_path, "A")
+    });
 
-        // Emit progress
-        let percentage = (bytes_read_a as f64 / file_a_size as f64) * 100.0;
-        if percentage - last_emitted_percentage_a >= 3.0 || percentage >= 99.9 {
-            if let Err(e) = app.emit("progress", ProgressPayload { percentage, file: "A".to_string() }) {
-                eprintln!("Failed to emit progress for File A: {}", e);
-            }
-            last_emitted_percentage_a = percentage;
-        }
-    }
+    let app_b = app.clone();
+    let handle_b = thread::spawn(move || {
+        process_file_with_mmap(&app_b, &file_b_path, "B")
+    });
 
-    // --- Step 2: Read File B and compare ---
-    let file_b = File::open(&file_b_path)?;
-        let file_b_metadata = file_b.metadata()?;
-        let file_b_size = file_b_metadata.len();
-        let mut reader_b = BufReader::with_capacity(BUFFER_SIZE, file_b);
-    
-    let mut unique_to_b: Vec<String> = Vec::new();
-    let mut bytes_read_b: u64 = 0;
-    let mut last_emitted_percentage_b: f64 = -1.0;
-    line.clear();
+    // --- Step 2: 等待线程完成并获取结果 ---
+    // .unwrap() 会在线程 panic 时 panic，这里我们假设它会返回 Result
+    let mut map_a = handle_a.join().unwrap()?;
+    let map_b = handle_b.join().unwrap()?;
 
-    while reader_b.read_line(&mut line)? > 0 {
-        bytes_read_b += line.len() as u64;
-        let trimmed_line = line.trim_end().to_string();
-        let hash = hash_line(&trimmed_line);
+    // --- Step 3: 比对两个 HashMap ---
+    let mut unique_to_b_vec: Vec<String> = Vec::new();
 
-        if let Some(entry) = line_hashes.get_mut(&hash) {
-            if entry.1 > 1 {
-                entry.1 -= 1;
-            } else {
-                line_hashes.remove(&hash);
-            }
+    for (hash_b, (line_b, count_b)) in map_b {
+        if let Some(entry_a) = map_a.get_mut(&hash_b) {
+            // 存在于两个文件中，计算公共数量并更新 A 的计数
+            let common_count = std::cmp::min(entry_a.1, count_b);
+            entry_a.1 -= common_count;
         } else {
-            unique_to_b.push(trimmed_line);
-        }
-        line.clear();
-
-        // Emit progress
-        let percentage = (bytes_read_b as f64 / file_b_size as f64) * 100.0;
-        if percentage - last_emitted_percentage_b >= 3.0 || percentage >= 99.9 {
-            if let Err(e) = app.emit("progress", ProgressPayload { percentage, file: "B".to_string() }) {
-                eprintln!("Failed to emit progress for File B: {}", e);
-            }
-            last_emitted_percentage_b = percentage;
+            // 只存在于文件 B
+            unique_to_b_vec.push(if count_b > 1 { format!("{} (x{})", line_b, count_b) } else { line_b });
         }
     }
 
-    // --- Step 3: Finalize and emit results ---
-    let unique_to_a: Vec<String> = line_hashes.values().map(|(l, c)| format!("{} (x{})", l, c)).collect();
+    // map_a 中计数大于 0 的就是只存在于文件 A 的
+    let unique_to_a_vec: Vec<String> = map_a
+        .values()
+        .filter(|(_, count)| *count > 0)
+        .map(|(line, count)| if *count > 1 { format!("{} (x{})", line, *count) } else { line.clone() })
+        .collect();
 
-    if let Err(e) = app.emit("diff", DiffPayload { unique_to_a, unique_to_b }) {
+    // --- Step 4: 发送最终结果 ---
+    if let Err(e) = app.emit("diff", DiffPayload { unique_to_a: unique_to_a_vec, unique_to_b: unique_to_b_vec }) {
         eprintln!("Failed to emit diff results: {}", e);
     }
 

@@ -11,6 +11,7 @@ const progressB = ref(0);
 const uniqueToA = ref<string[]>([]);
 const uniqueToB = ref<string[]>([]);
 const comparisonStarted = ref(false);
+const comparisonDuration = ref<string | null>(null); // New reactive variable for duration
 
 async function selectFile(fileVar: 'A' | 'B') {
   const selected = await open({
@@ -25,6 +26,8 @@ async function selectFile(fileVar: 'A' | 'B') {
   }
 }
 
+let startTime: number | null = null; // Variable to store the start time
+
 async function startComparison() {
   if (!fileAPath.value || !fileBPath.value) {
     alert("Please select both files.");
@@ -35,6 +38,8 @@ async function startComparison() {
   progressB.value = 0;
   uniqueToA.value = [];
   uniqueToB.value = [];
+  comparisonDuration.value = null; // Reset duration on new comparison
+  startTime = Date.now(); // Record start time
 
   await invoke("start_comparison", {
     fileAPath: fileAPath.value,
@@ -56,6 +61,14 @@ listen('diff', (event) => {
   uniqueToA.value = payload.unique_to_a;
   uniqueToB.value = payload.unique_to_b;
   comparisonStarted.value = false; // Reset for next comparison
+
+  if (startTime !== null) {
+    const endTime = Date.now();
+    const durationMs = endTime - startTime;
+    const seconds = (durationMs / 1000).toFixed(2); // Format to 2 decimal places
+    comparisonDuration.value = `${seconds} seconds`;
+    startTime = null; // Reset start time
+  }
 });
 
 </script>
@@ -82,6 +95,10 @@ listen('diff', (event) => {
       <progress :value="progressA" max="100"></progress>
       <label>File B Progress:</label>
       <progress :value="progressB" max="100"></progress>
+    </div>
+
+    <div v-if="comparisonDuration" class="comparison-time">
+      <h3>Comparison Time: {{ comparisonDuration }}</h3>
     </div>
 
     <div class="results-container">
@@ -120,6 +137,12 @@ listen('diff', (event) => {
 
 .progress-container {
   margin-top: 1rem;
+}
+
+.comparison-time {
+  margin-top: 1rem;
+  font-size: 1.1em;
+  color: #333;
 }
 
 .results-container {
