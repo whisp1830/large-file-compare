@@ -1,18 +1,16 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::Error as IoError;
 use std::thread;
 use ahash::AHasher;
 use std::hash::Hasher;
 use memmap2::Mmap;
-use std::io::Error as IoError;
 
 use tauri::{AppHandle, Emitter};
 
-const BUFFER_SIZE: usize = 1024 * 1024; // 1MB
 
 // --- Data Structures for Frontend Communication ---
 
@@ -28,7 +26,7 @@ struct DiffPayload {
     unique_to_b: Vec<String>,
 }
 
-// --- Core Hashing Logic ---
+// --- 核心哈希逻辑没有变化 ---
 
 fn hash_line(line: &str) -> u64 {
     let mut hasher = AHasher::default();
@@ -36,57 +34,48 @@ fn hash_line(line: &str) -> u64 {
     hasher.finish()
 }
 
-fn process_file_with_mmap(
+// --- Pass 1: 生成哈希计数 ---
+// 这个函数只计算哈希和它们的出现次数，不存储完整的行字符串，以节省内存。
+fn generate_hash_counts(
     app: &AppHandle,
     file_path: &str,
     progress_file_id: &str,
-) -> Result<HashMap<u64, (String, usize)>, IoError> {
-
+) -> Result<HashMap<u64, usize>, IoError> {
     let file = File::open(file_path)?;
     let file_size = file.metadata()?.len();
     if file_size == 0 {
         return Ok(HashMap::new());
     }
 
-    // SAFETY: 我们假设在程序读取期间文件不会被外部修改。
-    // 对于只读操作这是个合理的假设。
     let mmap = unsafe { Mmap::map(&file)? };
 
+    // 预估容量以提高性能
     let estimated_lines = (file_size / 50).max(1024) as usize;
-    let mut line_hashes: HashMap<u64, (String, usize)> = HashMap::with_capacity(estimated_lines);
+    let mut line_hashes: HashMap<u64, usize> = HashMap::with_capacity(estimated_lines);
 
     let mut bytes_processed: u64 = 0;
     let mut last_emitted_percentage: f64 = -1.0;
 
-    // 直接在内存映射的字节切片上按换行符分割
     for line_bytes in mmap.split(|&b| b == b'\n') {
-        // 更新处理进度
-        bytes_processed += line_bytes.len() as u64 + 1; // +1 for the newline character
+        bytes_processed += line_bytes.len() as u64 + 1;
 
-        // 跳过空行
         if line_bytes.is_empty() {
             continue;
         }
 
-        // 处理行尾可能存在的 '\r'
         let line_bytes = if line_bytes.last() == Some(&b'\r') {
             &line_bytes[..line_bytes.len() - 1]
         } else {
             line_bytes
         };
 
-        // 尝试将字节转换为 &str，如果文件不是有效的 UTF-8 可能会失败
         if let Ok(line_str) = std::str::from_utf8(line_bytes) {
             let hash = hash_line(line_str);
-            line_hashes
-                .entry(hash)
-                .and_modify(|e| e.1 += 1)
-                .or_insert_with(|| (line_str.to_string(), 1));
-        } else {
-            // 你可以在这里处理非 UTF-8 行，例如跳过或记录错误
+            // 直接增加计数器
+            *line_hashes.entry(hash).or_insert(0) += 1;
         }
 
-        // 发送进度更新 (逻辑保持不变)
+        // 进度报告逻辑保持不变
         let percentage = (bytes_processed as f64 / file_size as f64) * 100.0;
         if percentage - last_emitted_percentage >= 3.0 || percentage >= 99.9 {
             if let Err(e) = app.emit("progress", ProgressPayload { percentage, file: progress_file_id.to_string() }) {
@@ -99,8 +88,60 @@ fn process_file_with_mmap(
     Ok(line_hashes)
 }
 
-// --- Tauri Command ---
+// --- Pass 2: 根据唯一的哈希值收集行文本 ---
+// 这个函数接收一个包含唯一哈希和计数的Map，然后再次读取文件，把对应的行文本找出来。
+fn collect_unique_lines(
+    file_path: &str,
+    mut unique_hashes: HashMap<u64, usize>,
+) -> Result<Vec<String>, IoError> {
+    if unique_hashes.is_empty() {
+        return Ok(Vec::new());
+    }
 
+    let file = File::open(file_path)?;
+    let file_size = file.metadata()?.len();
+    if file_size == 0 {
+        return Ok(Vec::new());
+    }
+
+    let mmap = unsafe { Mmap::map(&file)? };
+    let mut results: Vec<String> = Vec::with_capacity(unique_hashes.len());
+
+    for line_bytes in mmap.split(|&b| b == b'\n') {
+        // 优化：如果已经找到了所有需要的行，就提前退出
+        if unique_hashes.is_empty() {
+            break;
+        }
+
+        if line_bytes.is_empty() {
+            continue;
+        }
+
+        let line_bytes = if line_bytes.last() == Some(&b'\r') {
+            &line_bytes[..line_bytes.len() - 1]
+        } else {
+            line_bytes
+        };
+
+        if let Ok(line_str) = std::str::from_utf8(line_bytes) {
+            let hash = hash_line(line_str);
+
+            // 使用 remove 来检查并获取计数，这样可以确保每行只被添加一次
+            if let Some(count) = unique_hashes.remove(&hash) {
+                let display_line = if count > 1 {
+                    format!("{} (x{})", line_str, count)
+                } else {
+                    line_str.to_string()
+                };
+                results.push(display_line);
+            }
+        }
+    }
+
+    Ok(results)
+}
+
+// --- Tauri Command: 没有变化 ---
 #[tauri::command]
 async fn start_comparison(
     app: AppHandle,
@@ -126,45 +167,72 @@ fn run_comparison(
 
     // --- Step 1: 并行处理两个文件 ---
     let app_a = app.clone();
+    let path_a_clone = file_a_path.clone();
     let handle_a = thread::spawn(move || {
-        process_file_with_mmap(&app_a, &file_a_path, "A")
+        generate_hash_counts(&app_a, &path_a_clone, "A")
     });
 
     let app_b = app.clone();
+    let path_b_clone = file_b_path.clone();
     let handle_b = thread::spawn(move || {
-        process_file_with_mmap(&app_b, &file_b_path, "B")
+        generate_hash_counts(&app_b, &path_b_clone, "B")
     });
 
-    // --- Step 2: 等待线程完成并获取结果 ---
-    // .unwrap() 会在线程 panic 时 panic，这里我们假设它会返回 Result
-    let mut map_a = handle_a.join().unwrap()?;
-    let map_b = handle_b.join().unwrap()?;
+    // 等待线程完成并获取计数的HashMap
+    // .unwrap() 会在线程 panic 时 panic，生产代码中应使用更稳健的错误处理
+    let mut map_a_counts = handle_a.join().unwrap()?;
+    let mut map_b_counts = handle_b.join().unwrap()?;
+    println!("Pass 1: Complete.");
 
-    // --- Step 3: 比对两个 HashMap ---
-    let mut unique_to_b_vec: Vec<String> = Vec::new();
 
-    for (hash_b, (line_b, count_b)) in map_b {
-        if let Some(entry_a) = map_a.get_mut(&hash_b) {
-            // 存在于两个文件中，计算公共数量并更新 A 的计数
-            let common_count = std::cmp::min(entry_a.1, count_b);
-            entry_a.1 -= common_count;
-        } else {
-            // 只存在于文件 B
-            unique_to_b_vec.push(if count_b > 1 { format!("{} (x{})", line_b, count_b) } else { line_b });
+    // --- 中间步骤: 比较哈希计数，找出独有的哈希 ---
+    println!("Comparing hash maps...");
+    let mut unique_to_a_counts: HashMap<u64, usize> = HashMap::new();
+    let mut unique_to_b_counts: HashMap<u64, usize> = HashMap::new();
+
+    // 找出文件A中独有的或多出的行
+    for (hash, count_a) in map_a_counts.iter() {
+        match map_b_counts.get(hash) {
+            Some(count_b) => {
+                if count_a > count_b {
+                    unique_to_a_counts.insert(*hash, count_a - count_b);
+                }
+            }
+            None => {
+                unique_to_a_counts.insert(*hash, *count_a);
+            }
         }
     }
 
-    // map_a 中计数大于 0 的就是只存在于文件 A 的
-    let unique_to_a_vec: Vec<String> = map_a
-        .values()
-        .filter(|(_, count)| *count > 0)
-        .map(|(line, count)| if *count > 1 { format!("{} (x{})", line, *count) } else { line.clone() })
-        .collect();
+    // 找出文件B中独有的或多出的行
+    for (hash, count_b) in map_b_counts.iter() {
+        if !map_a_counts.contains_key(hash) {
+            unique_to_b_counts.insert(*hash, *count_b);
+        }
+    }
+    println!("Comparison complete.");
 
-    // --- Step 4: 发送最终结果 ---
+
+    // --- PASS 2: 并行根据唯一的哈希取回行文本 ---
+    println!("Pass 2: Collecting unique lines...");
+    let handle_collect_a = thread::spawn(move || {
+        collect_unique_lines(&file_a_path, unique_to_a_counts)
+    });
+
+    let handle_collect_b = thread::spawn(move || {
+        collect_unique_lines(&file_b_path, unique_to_b_counts)
+    });
+
+    let unique_to_a_vec = handle_collect_a.join().unwrap()?;
+    let unique_to_b_vec = handle_collect_b.join().unwrap()?;
+    println!("Pass 2: Complete.");
+
+    // --- 最后一步: 发送最终结果 ---
+    println!("Emitting final results...");
     if let Err(e) = app.emit("diff", DiffPayload { unique_to_a: unique_to_a_vec, unique_to_b: unique_to_b_vec }) {
         eprintln!("Failed to emit diff results: {}", e);
     }
+    println!("All done.");
 
     Ok(())
 }
