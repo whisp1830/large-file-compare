@@ -1,14 +1,15 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::collections::{HashMap, HashSet};
-use std::fs::File;
-use std::io::Error as IoError;
-use std::thread;
-use ahash::AHasher;
-use std::hash::Hasher;
+use ahash::{AHashMap, AHasher};
+use memchr::memchr_iter;
 use memmap2::Mmap;
-
+use rayon::prelude::*;
+use std::fs::File;
+use std::hash::Hasher;
+use std::io::Error as IoError;
+use std::sync::Mutex;
+use std::thread;
 use tauri::{AppHandle, Emitter};
 
 
@@ -47,18 +48,18 @@ fn generate_hash_counts(
     app: &AppHandle,
     file_path: &str,
     progress_file_id: &str,
-) -> Result<HashMap<u64, usize>, IoError> {
+) -> Result<AHashMap<u64, usize>, IoError> {
     let file = File::open(file_path)?;
     let file_size = file.metadata()?.len();
     if file_size == 0 {
-        return Ok(HashMap::new());
+        return Ok(AHashMap::new());
     }
 
     let mmap = unsafe { Mmap::map(&file)? };
 
     // 预估容量以提高性能
     let estimated_lines = (file_size / 50).max(1024) as usize;
-    let mut line_hashes: HashMap<u64, usize> = HashMap::with_capacity(estimated_lines);
+    let mut line_hashes: AHashMap<u64, usize> = AHashMap::with_capacity(estimated_lines);
 
     let mut bytes_processed: u64 = 0;
     let mut last_emitted_percentage: f64 = -1.0;
@@ -84,7 +85,7 @@ fn generate_hash_counts(
 
         // 进度报告逻辑保持不变
         let percentage = (bytes_processed as f64 / file_size as f64) * 100.0;
-        if percentage - last_emitted_percentage >= 3.0 || percentage >= 99.9 {
+        if percentage - last_emitted_percentage >= 3.0 || percentage >= 99.9999999999999 {
             if let Err(e) = app.emit("progress", ProgressPayload { percentage, file: progress_file_id.to_string(), text: format!("Processing file {}...", progress_file_id) }) {
                 eprintln!("Failed to emit progress for File {}: {}", progress_file_id, e);
             }
@@ -99,8 +100,9 @@ fn generate_hash_counts(
 // 这个函数接收一个包含唯一哈希和计数的Map，然后再次读取文件，把对应的行文本找出来。
 fn collect_unique_lines(
     file_path: &str,
-    mut unique_hashes: HashMap<u64, usize>,
+    unique_hashes: AHashMap<u64, usize>, // 注意：类型变为 AHashMap
 ) -> Result<Vec<DiffLine>, IoError> {
+    // 初始检查与原版相同
     if unique_hashes.is_empty() {
         return Ok(Vec::new());
     }
@@ -112,42 +114,72 @@ fn collect_unique_lines(
     }
 
     let mmap = unsafe { Mmap::map(&file)? };
-    let mut results: Vec<DiffLine> = Vec::with_capacity(unique_hashes.len());
-    let mut line_number = 0;
 
-    for line_bytes in mmap.split(|&b| b == b'\n') {
-        line_number += 1;
-        // 优化：如果已经找到了所有需要的行，就提前退出
-        if unique_hashes.is_empty() {
-            break;
-        }
+    // 将 HashMap 包裹在 Mutex 中，以便在多线程中安全访问
+    // Mutex 用于确保每次只有一个线程可以修改 unique_hashes
+    let shared_hashes = Mutex::new(unique_hashes);
 
-        if line_bytes.is_empty() {
-            continue;
-        }
+    // 1. 快速查找所有换行符的位置
+    let line_starts: Vec<usize> = std::iter::once(0)
+        .chain(memchr_iter(b'\n', &mmap).map(|i| i + 1))
+        .collect();
 
-        let line_bytes = if line_bytes.last() == Some(&b'\r') {
-            &line_bytes[..line_bytes.len() - 1]
-        } else {
-            line_bytes
-        };
-
-        if let Ok(line_str) = std::str::from_utf8(line_bytes) {
-            let hash = hash_line(line_str);
-
-            // 使用 remove 来检查并获取计数，这样可以确保每行只被添加一次
-            if let Some(count) = unique_hashes.remove(&hash) {
-                let display_line = if count > 1 {
-                    format!("{} (x{})", line_str, count)
-                } else {
-                    line_str.to_string()
-                };
-                results.push(DiffLine { line_number, text: display_line });
+    // 2. 使用 Rayon 并行处理每一行
+    let mut found_lines: Vec<DiffLine> = line_starts
+        .par_iter()
+        .enumerate()
+        .filter_map(|(i, &start)| {
+            // 提前检查 shared_hashes 是否已空，减少不必要的处理和锁竞争
+            if shared_hashes.lock().unwrap().is_empty() {
+                return None;
             }
-        }
-    }
 
-    Ok(results)
+            // 计算行在 mmap 中的字节范围
+            let end = if i + 1 < line_starts.len() {
+                line_starts[i + 1] - 1 // 到下一个换行符之前
+            } else {
+                mmap.len() // 文件末尾
+            };
+
+            // 如果 start 越界或行为空，则跳过
+            if start >= end {
+                return None;
+            }
+
+            let mut line_bytes = &mmap[start..end];
+            if line_bytes.last() == Some(&b'\r') {
+                line_bytes = &line_bytes[..line_bytes.len() - 1];
+            }
+
+            // 只有当哈希可能存在时，才进行 UTF-8 转换和进一步处理
+            if let Ok(line_str) = std::str::from_utf8(line_bytes) {
+                let hash = hash_line(line_str);
+
+                // 锁住 HashMap，执行检查和移除操作
+                let mut hashes = shared_hashes.lock().unwrap();
+                if let Some(count) = hashes.remove(&hash) {
+                    // 如果找到了，构造 DiffLine 并返回
+                    let display_line = if count > 1 {
+                        format!("{} (x{})", line_str, count)
+                    } else {
+                        line_str.to_string()
+                    };
+                    return Some(DiffLine {
+                        line_number: i + 1, // 行号从 1 开始
+                        text: display_line,
+                    });
+                }
+            }
+
+            // 如果没找到，返回 None
+            None
+        })
+        .collect(); // 从所有线程收集结果
+
+    // 结果默认是无序的，因为并行执行。如果需要按行号排序，增加这一步。
+    found_lines.par_sort_unstable_by_key(|d| d.line_number);
+
+    Ok(found_lines)
 }
 
 // --- Tauri Command: 没有变化 ---
@@ -189,16 +221,16 @@ fn run_comparison(
 
     // 等待线程完成并获取计数的HashMap
     // .unwrap() 会在线程 panic 时 panic，生产代码中应使用更稳健的错误处理
-    let mut map_a_counts = handle_a.join().unwrap()?;
-    let mut map_b_counts = handle_b.join().unwrap()?;
+    let map_a_counts = handle_a.join().unwrap()?;
+    let map_b_counts = handle_b.join().unwrap()?;
     app.emit("progress", ProgressPayload { percentage: 100.0, file: "A".to_string(), text: "Comparing Hashes".to_string() }).unwrap();
     println!("Pass 1: Complete.");
 
 
     // --- 中间步骤: 比较哈希计数，找出独有的哈希 ---
     println!("Comparing hash maps...");
-    let mut unique_to_a_counts: HashMap<u64, usize> = HashMap::new();
-    let mut unique_to_b_counts: HashMap<u64, usize> = HashMap::new();
+    let mut unique_to_a_counts: AHashMap<u64, usize> = AHashMap::new();
+    let mut unique_to_b_counts: AHashMap<u64, usize> = AHashMap::new();
 
     // 找出文件A中独有的或多出的行
     for (hash, count_a) in map_a_counts.iter() {
