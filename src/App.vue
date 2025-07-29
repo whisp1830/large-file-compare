@@ -14,8 +14,18 @@ interface DiffLine {
   text: string;
 }
 
+interface TimeCost {
+  pass1_a_ms: number;
+  pass1_b_ms: number;
+  hash_map_comparison_ms: number;
+  pass2_a_ms: number;
+  pass2_b_ms: number;
+}
+
 const uniqueToA = ref<DiffLine[]>([]);
 const uniqueToB = ref<DiffLine[]>([]);
+const timeCost = ref<TimeCost | null>(null);
+const showTimeCost = ref(false);
 const comparisonStarted = ref(false);
 const comparisonDuration = ref<string | null>(null); // New reactive variable for duration
 
@@ -65,9 +75,10 @@ listen('progress', (event) => {
 });
 
 listen('diff', (event) => {
-  const payload = event.payload as { unique_to_a: DiffLine[]; unique_to_b: DiffLine[] };
+  const payload = event.payload as { unique_to_a: DiffLine[]; unique_to_b: DiffLine[]; time_cost: TimeCost };
   uniqueToA.value = payload.unique_to_a;
   uniqueToB.value = payload.unique_to_b;
+  timeCost.value = payload.time_cost;
   comparisonStarted.value = false; // Reset for next comparison
 
   if (startTime !== null) {
@@ -108,6 +119,14 @@ listen('diff', (event) => {
 
     <div v-if="comparisonDuration" class="comparison-time">
       <h3>Comparison Time: {{ comparisonDuration }}</h3>
+      <button @click="showTimeCost = !showTimeCost">Time Cost</button>
+      <div v-if="showTimeCost && timeCost" class="time-cost-details">
+        <p>Pass 1 (File A): {{ timeCost.pass1_a_ms }} ms</p>
+        <p>Pass 1 (File B): {{ timeCost.pass1_b_ms }} ms</p>
+        <p>Hash Map Comparison: {{ timeCost.hash_map_comparison_ms }} ms</p>
+        <p>Pass 2 (File A): {{ timeCost.pass2_a_ms }} ms</p>
+        <p>Pass 2 (File B): {{ timeCost.pass2_b_ms }} ms</p>
+      </div>
     </div>
 
     <div class="results-container">
@@ -152,10 +171,16 @@ listen('diff', (event) => {
   margin-top: 1rem;
 }
 
-.comparison-time {
+.comparison-time button {
+  margin-left: 1rem;
+}
+
+.time-cost-details {
   margin-top: 1rem;
-  font-size: 1.1em;
-  color: #333;
+  padding: 1rem;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  background-color: #f9f9f9;
 }
 
 .results-container {

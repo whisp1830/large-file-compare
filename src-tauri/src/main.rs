@@ -29,9 +29,19 @@ struct DiffLine {
 }
 
 #[derive(Clone, serde::Serialize)]
+struct TimeCost {
+    pass1_a_ms: u128,
+    pass1_b_ms: u128,
+    hash_map_comparison_ms: u128,
+    pass2_a_ms: u128,
+    pass2_b_ms: u128,
+}
+
+#[derive(Clone, serde::Serialize)]
 struct DiffPayload {
     unique_to_a: Vec<DiffLine>,
     unique_to_b: Vec<DiffLine>,
+    time_cost: TimeCost,
 }
 
 // --- 核心哈希逻辑没有变化 ---
@@ -205,29 +215,36 @@ fn run_comparison(
     file_a_path: String,
     file_b_path: String,
 ) -> Result<(), std::io::Error> {
+    let start_time = std::time::Instant::now();
 
     // --- Step 1: 并行处理两个文件 ---
     let app_a = app.clone();
     let path_a_clone = file_a_path.clone();
     let handle_a = thread::spawn(move || {
-        generate_hash_counts(&app_a, &path_a_clone, "A")
+        let now = std::time::Instant::now();
+        let result = generate_hash_counts(&app_a, &path_a_clone, "A");
+        (result, now.elapsed().as_millis())
     });
 
     let app_b = app.clone();
     let path_b_clone = file_b_path.clone();
     let handle_b = thread::spawn(move || {
-        generate_hash_counts(&app_b, &path_b_clone, "B")
+        let now = std::time::Instant::now();
+        let result = generate_hash_counts(&app_b, &path_b_clone, "B");
+        (result, now.elapsed().as_millis())
     });
 
     // 等待线程完成并获取计数的HashMap
-    // .unwrap() 会在线程 panic 时 panic，生产代码中应使用更稳健的错误处理
-    let map_a_counts = handle_a.join().unwrap()?;
-    let map_b_counts = handle_b.join().unwrap()?;
+    let (map_a_counts_res, pass1_a_ms) = handle_a.join().unwrap();
+    let (map_b_counts_res, pass1_b_ms) = handle_b.join().unwrap();
+    let mut map_a_counts = map_a_counts_res?;
+    let mut map_b_counts = map_b_counts_res?;
     app.emit("progress", ProgressPayload { percentage: 100.0, file: "A".to_string(), text: "Comparing Hashes".to_string() }).unwrap();
     println!("Pass 1: Complete.");
 
 
     // --- 中间步骤: 比较哈希计数，找出独有的哈希 ---
+    let now = std::time::Instant::now();
     println!("Comparing hash maps...");
     let mut unique_to_a_counts: AHashMap<u64, usize> = AHashMap::new();
     let mut unique_to_b_counts: AHashMap<u64, usize> = AHashMap::new();
@@ -252,30 +269,44 @@ fn run_comparison(
             unique_to_b_counts.insert(*hash, *count_b);
         }
     }
+    let hash_map_comparison_ms = now.elapsed().as_millis();
     println!("Comparison complete.");
 
 
     // --- PASS 2: 并行根据唯一的哈希取回行文本 ---
     println!("Pass 2: Collecting unique lines...");
     let handle_collect_a = thread::spawn(move || {
-        collect_unique_lines(&file_a_path, unique_to_a_counts)
+        let now = std::time::Instant::now();
+        let result = collect_unique_lines(&file_a_path, unique_to_a_counts);
+        (result, now.elapsed().as_millis())
     });
 
     let handle_collect_b = thread::spawn(move || {
-        collect_unique_lines(&file_b_path, unique_to_b_counts)
+        let now = std::time::Instant::now();
+        let result = collect_unique_lines(&file_b_path, unique_to_b_counts);
+        (result, now.elapsed().as_millis())
     });
 
-    let unique_to_a_vec = handle_collect_a.join().unwrap()?;
-    let unique_to_b_vec = handle_collect_b.join().unwrap()?;
+    let (unique_to_a_vec_res, pass2_a_ms) = handle_collect_a.join().unwrap();
+    let (unique_to_b_vec_res, pass2_b_ms) = handle_collect_b.join().unwrap();
+    let unique_to_a_vec = unique_to_a_vec_res?;
+    let unique_to_b_vec = unique_to_b_vec_res?;
     app.emit("progress", ProgressPayload { percentage: 100.0, file: "B".to_string(), text: "Comparison Finished".to_string() }).unwrap();
     println!("Pass 2: Complete.");
 
     // --- 最后一步: 发送最终结果 ---
     println!("Emitting final results...");
-    if let Err(e) = app.emit("diff", DiffPayload { unique_to_a: unique_to_a_vec, unique_to_b: unique_to_b_vec }) {
+    let time_cost = TimeCost {
+        pass1_a_ms,
+        pass1_b_ms,
+        hash_map_comparison_ms,
+        pass2_a_ms,
+        pass2_b_ms,
+    };
+    if let Err(e) = app.emit("diff", DiffPayload { unique_to_a: unique_to_a_vec, unique_to_b: unique_to_b_vec, time_cost }) {
         eprintln!("Failed to emit diff results: {}", e);
     }
-    println!("All done.");
+    println!("All done in {}ms.", start_time.elapsed().as_millis());
 
     Ok(())
 }
