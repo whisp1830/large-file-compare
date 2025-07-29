@@ -74,10 +74,18 @@ listen('progress', (event) => {
   progressText.value = payload.text;
 });
 
-listen('diff', (event) => {
-  const payload = event.payload as { unique_to_a: DiffLine[]; unique_to_b: DiffLine[]; time_cost: TimeCost };
-  uniqueToA.value = payload.unique_to_a;
-  uniqueToB.value = payload.unique_to_b;
+listen('unique_line', (event) => {
+  const payload = event.payload as { file: string; line_number: number; text: string };
+  const diffLine: DiffLine = { line_number: payload.line_number, text: payload.text };
+  if (payload.file === 'A') {
+    uniqueToA.value.push(diffLine);
+  } else {
+    uniqueToB.value.push(diffLine);
+  }
+});
+
+listen('comparison_finished', (event) => {
+  const payload = event.payload as { time_cost: TimeCost };
   timeCost.value = payload.time_cost;
   comparisonStarted.value = false; // Reset for next comparison
 

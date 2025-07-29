@@ -21,7 +21,8 @@ struct ProgressPayload {
 }
 
 #[derive(Clone, serde::Serialize)]
-struct DiffLine {
+struct UniqueLinePayload {
+    file: String,
     line_number: usize,
     text: String,
 }
@@ -36,9 +37,7 @@ struct TimeCost {
 }
 
 #[derive(Clone, serde::Serialize)]
-struct DiffPayload {
-    unique_to_a: Vec<DiffLine>,
-    unique_to_b: Vec<DiffLine>,
+struct ComparisonFinishedPayload {
     time_cost: TimeCost,
 }
 
@@ -106,18 +105,20 @@ fn generate_hash_counts(
 // --- Pass 2: 根据唯一的哈希值收集行文本 ---
 // 这个函数接收一个包含唯一哈希和计数的Map，然后再次读取文件，把对应的行文本找出来。
 fn collect_unique_lines(
+    app: &AppHandle,
     file_path: &str,
-    mut unique_hashes: AHashMap<u64, usize>, // 注意：改为 mut 以允许移除
-) -> Result<Vec<DiffLine>, IoError> {
+    mut unique_hashes: AHashMap<u64, usize>,
+    file_id: &str,
+) -> Result<(), IoError> {
     // 初始检查
     if unique_hashes.is_empty() {
-        return Ok(Vec::new());
+        return Ok(());
     }
 
     let file = File::open(file_path)?;
     let file_size = file.metadata()?.len();
     if file_size == 0 {
-        return Ok(Vec::new());
+        return Ok(());
     }
 
     let mmap = unsafe { Mmap::map(&file)? };
@@ -127,9 +128,7 @@ fn collect_unique_lines(
         .chain(memchr_iter(b'\n', &mmap).map(|i| i + 1))
         .collect();
 
-    // 2. 顺序处理每一行（移除并行，避免 Mutex）
-    let mut found_lines: Vec<DiffLine> = Vec::with_capacity(unique_hashes.len().min(line_starts.len()));
-
+    // 2. 顺序处理每一行
     for (i, &start) in line_starts.iter().enumerate() {
         // 精确早停：如果所有唯一哈希已找到，停止扫描剩余行
         if unique_hashes.is_empty() {
@@ -164,17 +163,20 @@ fn collect_unique_lines(
                 } else {
                     line_str.to_string()
                 };
-                found_lines.push(DiffLine {
-                    line_number: i + 1, // 行号从 1 开始
+                if let Err(e) = app.emit("unique_line", UniqueLinePayload {
+                    file: file_id.to_string(),
+                    line_number: i + 1,
                     text: display_line,
-                });
+                }) {
+                    eprintln!("Failed to emit unique_line event: {}", e);
+                }
             }
         }
     }
 
-    // 无需排序：结果已按行号顺序
-    Ok(found_lines)
+    Ok(())
 }
+
 
 // --- Tauri Command: 没有变化 ---
 #[tauri::command]
@@ -259,22 +261,24 @@ fn run_comparison(
 
     // --- PASS 2: 并行根据唯一的哈希取回行文本 ---
     println!("Pass 2: Collecting unique lines...");
+    let app_a_collect = app.clone();
     let handle_collect_a = thread::spawn(move || {
         let now = std::time::Instant::now();
-        let result = collect_unique_lines(&file_a_path, unique_to_a_counts);
+        let result = collect_unique_lines(&app_a_collect, &file_a_path, unique_to_a_counts, "A");
         (result, now.elapsed().as_millis())
     });
 
+    let app_b_collect = app.clone();
     let handle_collect_b = thread::spawn(move || {
         let now = std::time::Instant::now();
-        let result = collect_unique_lines(&file_b_path, unique_to_b_counts);
+        let result = collect_unique_lines(&app_b_collect, &file_b_path, unique_to_b_counts, "B");
         (result, now.elapsed().as_millis())
     });
 
-    let (unique_to_a_vec_res, pass2_a_ms) = handle_collect_a.join().unwrap();
-    let (unique_to_b_vec_res, pass2_b_ms) = handle_collect_b.join().unwrap();
-    let unique_to_a_vec = unique_to_a_vec_res?;
-    let unique_to_b_vec = unique_to_b_vec_res?;
+    let (res_a, pass2_a_ms) = handle_collect_a.join().unwrap();
+    let (res_b, pass2_b_ms) = handle_collect_b.join().unwrap();
+    res_a?;
+    res_b?;
     app.emit("progress", ProgressPayload { percentage: 100.0, file: "B".to_string(), text: "Comparison Finished".to_string() }).unwrap();
     println!("Pass 2: Complete.");
 
@@ -287,8 +291,8 @@ fn run_comparison(
         pass2_a_ms,
         pass2_b_ms,
     };
-    if let Err(e) = app.emit("diff", DiffPayload { unique_to_a: unique_to_a_vec, unique_to_b: unique_to_b_vec, time_cost }) {
-        eprintln!("Failed to emit diff results: {}", e);
+    if let Err(e) = app.emit("comparison_finished", ComparisonFinishedPayload { time_cost }) {
+        eprintln!("Failed to emit comparison_finished event: {}", e);
     }
     println!("All done in {}ms.", start_time.elapsed().as_millis());
 
