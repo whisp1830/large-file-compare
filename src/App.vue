@@ -8,8 +8,14 @@ const fileAPath = ref("");
 const fileBPath = ref("");
 const progressA = ref(0);
 const progressB = ref(0);
-const uniqueToA = ref<string[]>([]);
-const uniqueToB = ref<string[]>([]);
+const progressText = ref("Starting...");
+interface DiffLine {
+  line_number: number;
+  text: string;
+}
+
+const uniqueToA = ref<DiffLine[]>([]);
+const uniqueToB = ref<DiffLine[]>([]);
 const comparisonStarted = ref(false);
 const comparisonDuration = ref<string | null>(null); // New reactive variable for duration
 
@@ -39,6 +45,7 @@ async function startComparison() {
   uniqueToA.value = [];
   uniqueToB.value = [];
   comparisonDuration.value = null; // Reset duration on new comparison
+  progressText.value = "Starting...";
   startTime = Date.now(); // Record start time
 
   await invoke("start_comparison", {
@@ -48,16 +55,17 @@ async function startComparison() {
 }
 
 listen('progress', (event) => {
-  const payload = event.payload as { percentage: number; file: string };
+  const payload = event.payload as { percentage: number; file: string, text: string };
   if (payload.file === 'A') {
     progressA.value = payload.percentage;
   } else {
     progressB.value = payload.percentage;
   }
+  progressText.value = payload.text;
 });
 
 listen('diff', (event) => {
-  const payload = event.payload as { unique_to_a: string[]; unique_to_b: string[] };
+  const payload = event.payload as { unique_to_a: DiffLine[]; unique_to_b: DiffLine[] };
   uniqueToA.value = payload.unique_to_a;
   uniqueToB.value = payload.unique_to_b;
   comparisonStarted.value = false; // Reset for next comparison
@@ -95,6 +103,7 @@ listen('diff', (event) => {
       <progress :value="progressA" max="100"></progress>
       <label>File B Progress:</label>
       <progress :value="progressB" max="100"></progress>
+      <p>{{ progressText }}</p>
     </div>
 
     <div v-if="comparisonDuration" class="comparison-time">
@@ -104,11 +113,15 @@ listen('diff', (event) => {
     <div class="results-container">
       <div class="result-pane">
         <h2>Unique to File A</h2>
-        <textarea readonly :value="uniqueToA.join('\n')"></textarea>
+        <div class="diff-output">
+          <pre v-for="line in uniqueToA" :key="line.line_number" class="diff-line removed"><code><span class="line-number">{{ line.line_number }}</span>- {{ line.text }}</code></pre>
+        </div>
       </div>
       <div class="result-pane">
         <h2>Unique to File B</h2>
-        <textarea readonly :value="uniqueToB.join('\n')"></textarea>
+        <div class="diff-output">
+          <pre v-for="line in uniqueToB" :key="line.line_number" class="diff-line added"><code><span class="line-number">{{ line.line_number }}</span>+ {{ line.text }}</code></pre>
+        </div>
       </div>
     </div>
   </div>
@@ -165,5 +178,41 @@ textarea {
   border: 1px solid #ccc;
   padding: 0.5rem;
   font-family: monospace;
+}
+
+.diff-output {
+  background-color: #f8f9fa;
+  border: 1px solid #dee2e6;
+  border-radius: 4px;
+  padding: 1rem;
+  height: 400px;
+  overflow-y: auto;
+  text-align: left;
+}
+
+.diff-line {
+  margin: 0;
+  padding: 0.25rem 0.5rem;
+  font-family: monospace;
+  white-space: pre-wrap;
+}
+
+.diff-line.added {
+  background-color: #e6ffed;
+  color: #24292e;
+}
+
+.diff-line.removed {
+  background-color: #ffeef0;
+  color: #24292e;
+}
+
+.line-number {
+  display: inline-block;
+  width: 40px;
+  color: #6a737d;
+  text-align: right;
+  margin-right: 1rem;
+  user-select: none;
 }
 </style>

@@ -18,12 +18,19 @@ use tauri::{AppHandle, Emitter};
 struct ProgressPayload {
     percentage: f64,
     file: String,
+    text: String,
+}
+
+#[derive(Clone, serde::Serialize)]
+struct DiffLine {
+    line_number: usize,
+    text: String,
 }
 
 #[derive(Clone, serde::Serialize)]
 struct DiffPayload {
-    unique_to_a: Vec<String>,
-    unique_to_b: Vec<String>,
+    unique_to_a: Vec<DiffLine>,
+    unique_to_b: Vec<DiffLine>,
 }
 
 // --- 核心哈希逻辑没有变化 ---
@@ -78,7 +85,7 @@ fn generate_hash_counts(
         // 进度报告逻辑保持不变
         let percentage = (bytes_processed as f64 / file_size as f64) * 100.0;
         if percentage - last_emitted_percentage >= 3.0 || percentage >= 99.9 {
-            if let Err(e) = app.emit("progress", ProgressPayload { percentage, file: progress_file_id.to_string() }) {
+            if let Err(e) = app.emit("progress", ProgressPayload { percentage, file: progress_file_id.to_string(), text: format!("Processing file {}...", progress_file_id) }) {
                 eprintln!("Failed to emit progress for File {}: {}", progress_file_id, e);
             }
             last_emitted_percentage = percentage;
@@ -93,7 +100,7 @@ fn generate_hash_counts(
 fn collect_unique_lines(
     file_path: &str,
     mut unique_hashes: HashMap<u64, usize>,
-) -> Result<Vec<String>, IoError> {
+) -> Result<Vec<DiffLine>, IoError> {
     if unique_hashes.is_empty() {
         return Ok(Vec::new());
     }
@@ -105,9 +112,11 @@ fn collect_unique_lines(
     }
 
     let mmap = unsafe { Mmap::map(&file)? };
-    let mut results: Vec<String> = Vec::with_capacity(unique_hashes.len());
+    let mut results: Vec<DiffLine> = Vec::with_capacity(unique_hashes.len());
+    let mut line_number = 0;
 
     for line_bytes in mmap.split(|&b| b == b'\n') {
+        line_number += 1;
         // 优化：如果已经找到了所有需要的行，就提前退出
         if unique_hashes.is_empty() {
             break;
@@ -133,7 +142,7 @@ fn collect_unique_lines(
                 } else {
                     line_str.to_string()
                 };
-                results.push(display_line);
+                results.push(DiffLine { line_number, text: display_line });
             }
         }
     }
@@ -182,6 +191,7 @@ fn run_comparison(
     // .unwrap() 会在线程 panic 时 panic，生产代码中应使用更稳健的错误处理
     let mut map_a_counts = handle_a.join().unwrap()?;
     let mut map_b_counts = handle_b.join().unwrap()?;
+    app.emit("progress", ProgressPayload { percentage: 100.0, file: "A".to_string(), text: "Comparing Hashes".to_string() }).unwrap();
     println!("Pass 1: Complete.");
 
 
@@ -225,6 +235,7 @@ fn run_comparison(
 
     let unique_to_a_vec = handle_collect_a.join().unwrap()?;
     let unique_to_b_vec = handle_collect_b.join().unwrap()?;
+    app.emit("progress", ProgressPayload { percentage: 100.0, file: "B".to_string(), text: "Comparison Finished".to_string() }).unwrap();
     println!("Pass 2: Complete.");
 
     // --- 最后一步: 发送最终结果 ---
