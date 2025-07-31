@@ -21,11 +21,7 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-tokio = { version = "1", features = ["full"] }
-ahash = "0.8"
-crossbeam-channel = "0.5"
 tauri-plugin-dialog = "2.0.0-beta.8"
 memmap2 = "0.9.7"
 memchr = "2.7"
-rayon = "1.10"
+gxhash = "3.5.0"

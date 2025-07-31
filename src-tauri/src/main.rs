@@ -1,7 +1,7 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use ahash::{AHashMap, AHasher};
+use gxhash::{GxHasher, HashMap, HashMapExt};
 use memchr::memchr_iter;
 use memmap2::Mmap;
 use std::fs::File;
@@ -44,8 +44,10 @@ struct ComparisonFinishedPayload {
 // --- 核心哈希逻辑没有变化 ---
 
 fn hash_line(line: &str) -> u64 {
-    let mut hasher = AHasher::default();
+    let mut hasher = GxHasher::default();
+    // 将字符串的字节写入哈希器。
     hasher.write(line.as_bytes());
+    // 完成哈希计算并返回结果。
     hasher.finish()
 }
 
@@ -55,18 +57,18 @@ fn generate_hash_counts(
     app: &AppHandle,
     file_path: &str,
     progress_file_id: &str,
-) -> Result<AHashMap<u64, usize>, IoError> {
+) -> Result<HashMap<u64, usize>, IoError> {
     let file = File::open(file_path)?;
     let file_size = file.metadata()?.len();
     if file_size == 0 {
-        return Ok(AHashMap::new());
+        return Ok(HashMap::new());
     }
 
     let mmap = unsafe { Mmap::map(&file)? };
 
     // 预估容量以提高性能
     let estimated_lines = (file_size / 50).max(1024) as usize;
-    let mut line_hashes: AHashMap<u64, usize> = AHashMap::with_capacity(estimated_lines);
+    let mut line_hashes: HashMap<u64, usize> = HashMap::with_capacity(estimated_lines);
 
     let mut bytes_processed: u64 = 0;
     let mut last_emitted_percentage: f64 = -1.0;
@@ -91,7 +93,7 @@ fn generate_hash_counts(
         }
 
         let percentage = (bytes_processed as f64 / file_size as f64) * 100.0;
-        if percentage - last_emitted_percentage >= 3.0 || percentage >= 99.9999999999999 {
+        if percentage - last_emitted_percentage >= 5.0 || percentage >= 99.9999999999999 {
             if let Err(e) = app.emit("progress", ProgressPayload { percentage, file: progress_file_id.to_string(), text: format!("Processing file {}...", progress_file_id) }) {
                 eprintln!("Failed to emit progress for File {}: {}", progress_file_id, e);
             }
@@ -107,7 +109,7 @@ fn generate_hash_counts(
 fn collect_unique_lines(
     app: &AppHandle,
     file_path: &str,
-    mut unique_hashes: AHashMap<u64, usize>,
+    mut unique_hashes: HashMap<u64, usize>,
     file_id: &str,
 ) -> Result<(), IoError> {
     // 初始检查
@@ -232,8 +234,8 @@ fn run_comparison(
     // --- 中间步骤: 比较哈希计数，找出独有的哈希 ---
     let now = std::time::Instant::now();
     println!("Comparing hash maps...");
-    let mut unique_to_a_counts: AHashMap<u64, usize> = AHashMap::new();
-    let mut unique_to_b_counts: AHashMap<u64, usize> = AHashMap::new();
+    let mut unique_to_a_counts: HashMap<u64, usize> = HashMap::new();
+    let mut unique_to_b_counts: HashMap<u64, usize> = HashMap::new();
 
     // 找出文件A中独有的或多出的行
     for (hash, count_a) in map_a_counts.iter() {
