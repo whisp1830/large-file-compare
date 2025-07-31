@@ -263,24 +263,35 @@ fn run_comparison(
     let mut unique_to_a_counts: HashMap<u64, usize> = HashMap::new();
     let mut unique_to_b_counts: HashMap<u64, usize> = HashMap::new();
 
-    // 找出文件A中独有的或多出的行
-    for (hash, count_a) in map_a_counts.iter() {
+    // Iterate through File A's hashes to find differences
+    for (hash, &count_a) in &map_a_counts {
         match map_b_counts.get(hash) {
-            Some(count_b) => {
+            Some(&count_b) => {
+                // Hash exists in both. Check if A has more.
                 if count_a > count_b {
                     unique_to_a_counts.insert(*hash, count_a - count_b);
                 }
             }
             None => {
-                unique_to_a_counts.insert(*hash, *count_a);
+                // Hash only exists in A.
+                unique_to_a_counts.insert(*hash, count_a);
             }
         }
     }
 
-    // 找出文件B中独有的或多出的行
-    for (hash, count_b) in map_b_counts.iter() {
-        if !map_a_counts.contains_key(hash) {
-            unique_to_b_counts.insert(*hash, *count_b);
+    // Iterate through File B's hashes to find what's unique or more frequent in B
+    for (hash, &count_b) in &map_b_counts {
+        match map_a_counts.get(hash) {
+            Some(&count_a) => {
+                // Hash exists in both. Check if B has more.
+                if count_b > count_a {
+                    unique_to_b_counts.insert(*hash, count_b - count_a);
+                }
+            }
+            None => {
+                // Hash only exists in B.
+                unique_to_b_counts.insert(*hash, count_b);
+            }
         }
     }
     let hash_map_comparison_ms = now.elapsed().as_millis();
