@@ -2,13 +2,14 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use gxhash::{GxHasher, HashMap, HashMapExt};
-use memchr::memchr_iter;
 use memmap2::Mmap;
 use std::fs::File;
 use std::hash::Hasher;
-use std::io::Error as IoError;
+use std::io::{BufRead, BufReader, Error as IoError, Seek, SeekFrom};
 use std::thread;
 use tauri::{AppHandle, Emitter};
+use rayon::prelude::*;
+use memchr::memchr_iter;
 
 
 // --- Data Structures for Frontend Communication ---
@@ -51,127 +52,152 @@ fn hash_line(line: &str) -> u64 {
     hasher.finish()
 }
 
-// --- Pass 1: 生成哈希计数 ---
-// 这个函数只计算哈希和它们的出现次数，不存储完整的行字符串，以节省内存。
-fn generate_hash_counts(
+// --- Pass 1: 生成哈希计数和索引 (并行版) ---
+// 使用 rayon 和 memmap 并行处理文件行，以提高多核CPU利用率。
+// This function processes file lines in parallel using rayon and memmap to improve multi-core CPU utilization.
+fn generate_hash_counts_and_index(
     app: &AppHandle,
     file_path: &str,
     progress_file_id: &str,
-) -> Result<HashMap<u64, usize>, IoError> {
+) -> Result<(HashMap<u64, usize>, HashMap<u64, (u64, usize)>), IoError> {
     let file = File::open(file_path)?;
     let file_size = file.metadata()?.len();
     if file_size == 0 {
-        return Ok(HashMap::new());
+        return Ok((HashMap::new(), HashMap::new()));
+    }
+
+    // Emit initial progress
+    if let Err(e) = app.emit("progress", ProgressPayload { percentage: 0.0, file: progress_file_id.to_string(), text: format!("Hashing file {}...", progress_file_id) }) {
+        eprintln!("Failed to emit progress for File {}: {}", progress_file_id, e);
     }
 
     let mmap = unsafe { Mmap::map(&file)? };
 
-    // 预估容量以提高性能
-    let estimated_lines = (file_size / 50).max(1024) as usize;
-    let mut line_hashes: HashMap<u64, usize> = HashMap::with_capacity(estimated_lines);
+    // Find all line endings to define our work units
+    let newline_positions: Vec<usize> = memchr_iter(b'\n', &mmap).collect();
+    let total_lines = newline_positions.len();
 
-    let mut bytes_processed: u64 = 0;
-    let mut last_emitted_percentage: f64 = -1.0;
+    // Process all full lines in parallel
+    let (mut line_counts, mut line_index) = if total_lines > 0 {
+        (0..total_lines)
+            .into_par_iter()
+            .filter_map(|i| {
+                let start = if i == 0 { 0 } else { newline_positions[i - 1] + 1 };
+                let end = newline_positions[i];
+                let line_bytes = &mmap[start..end];
 
-    for line_bytes in mmap.split(|&b| b == b'\n') {
-        bytes_processed += line_bytes.len() as u64 + 1;
+                let line_bytes_cleaned = if line_bytes.last() == Some(&b'\r') {
+                    &line_bytes[..line_bytes.len() - 1]
+                } else {
+                    line_bytes
+                };
 
-        if line_bytes.is_empty() {
-            continue;
-        }
+                if line_bytes_cleaned.is_empty() {
+                    return None;
+                }
 
-        let line_bytes = if line_bytes.last() == Some(&b'\r') {
-            &line_bytes[..line_bytes.len() - 1]
+                if let Ok(line_str) = std::str::from_utf8(line_bytes_cleaned) {
+                    let hash = hash_line(line_str);
+                    let offset = start as u64;
+                    let line_number = i + 1;
+                    Some((hash, offset, line_number))
+                } else {
+                    None
+                }
+            })
+            .fold(
+                || (HashMap::new(), HashMap::new()),
+                |mut acc, (hash, offset, line_number)| {
+                    *acc.0.entry(hash).or_insert(0) += 1;
+                    acc.1.entry(hash).or_insert((offset, line_number));
+                    acc
+                },
+            )
+            .reduce(
+                || (HashMap::new(), HashMap::new()),
+                |mut map_a, map_b| {
+                    for (hash, count_b) in map_b.0 {
+                        *map_a.0.entry(hash).or_insert(0) += count_b;
+                    }
+                    for (hash, info_b) in map_b.1 {
+                        map_a.1.entry(hash)
+                            .and_modify(|info_a| {
+                                if info_b.0 < info_a.0 {
+                                    *info_a = info_b;
+                                }
+                            })
+                            .or_insert(info_b);
+                    }
+                    map_a
+                },
+            )
+    } else {
+        (HashMap::new(), HashMap::new())
+    };
+
+    // Handle the remainder of the file (the part after the last newline)
+    let last_newline_pos = newline_positions.last().map_or(0, |p| p + 1);
+    if last_newline_pos < mmap.len() {
+        let remainder = &mmap[last_newline_pos..];
+        let line_bytes_cleaned = if remainder.last() == Some(&b'\r') {
+            &remainder[..remainder.len() - 1]
         } else {
-            line_bytes
+            remainder
         };
 
-        if let Ok(line_str) = std::str::from_utf8(line_bytes) {
-            let hash = hash_line(line_str);
-            // 直接增加计数器
-            *line_hashes.entry(hash).or_insert(0) += 1;
-        }
-
-        let percentage = (bytes_processed as f64 / file_size as f64) * 100.0;
-        if percentage - last_emitted_percentage >= 5.0 || percentage >= 99.9999999999999 {
-            if let Err(e) = app.emit("progress", ProgressPayload { percentage, file: progress_file_id.to_string(), text: format!("Processing file {}...", progress_file_id) }) {
-                eprintln!("Failed to emit progress for File {}: {}", progress_file_id, e);
+        if !line_bytes_cleaned.is_empty() {
+            if let Ok(line_str) = std::str::from_utf8(line_bytes_cleaned) {
+                let hash = hash_line(line_str);
+                *line_counts.entry(hash).or_insert(0) += 1;
+                line_index.entry(hash).or_insert((last_newline_pos as u64, total_lines + 1));
             }
-            last_emitted_percentage = percentage;
         }
     }
-
-    Ok(line_hashes)
+    
+    Ok((line_counts, line_index))
 }
 
-// --- Pass 2: 根据唯一的哈希值收集行文本 ---
-// 这个函数接收一个包含唯一哈希和计数的Map，然后再次读取文件，把对应的行文本找出来。
-fn collect_unique_lines(
+
+// --- Pass 2: 根据唯一的哈希值和索引收集行文本 ---
+// 这个函数接收一个包含唯一哈希和计数的Map，以及一个从哈希到（偏移量，行号）的索引。
+// 它使用索引直接跳转到文件中的特定位置来读取行，避免了全文件扫描。
+// This function receives a map of unique hashes and their counts, and an index from hash to (offset, line number).
+// It uses the index to jump directly to specific locations in the file to read lines, avoiding a full file scan.
+fn collect_unique_lines_with_index(
     app: &AppHandle,
     file_path: &str,
-    mut unique_hashes: HashMap<u64, usize>,
+    unique_hashes: HashMap<u64, usize>,
+    hash_to_info: &HashMap<u64, (u64, usize)>,
     file_id: &str,
 ) -> Result<(), IoError> {
-    // 初始检查
     if unique_hashes.is_empty() {
         return Ok(());
     }
 
     let file = File::open(file_path)?;
-    let file_size = file.metadata()?.len();
-    if file_size == 0 {
-        return Ok(());
-    }
+    let mut reader = BufReader::new(file);
 
-    let mmap = unsafe { Mmap::map(&file)? };
+    for (hash, count) in unique_hashes.iter() {
+        if let Some((offset, line_number)) = hash_to_info.get(hash) {
+            reader.seek(SeekFrom::Start(*offset))?;
 
-    // 1. 快速查找所有换行符的位置（与原版相同，高效）
-    let line_starts: Vec<usize> = std::iter::once(0)
-        .chain(memchr_iter(b'\n', &mmap).map(|i| i + 1))
-        .collect();
+            let mut line_buffer = String::new();
+            reader.read_line(&mut line_buffer)?;
 
-    // 2. 顺序处理每一行
-    for (i, &start) in line_starts.iter().enumerate() {
-        // 精确早停：如果所有唯一哈希已找到，停止扫描剩余行
-        if unique_hashes.is_empty() {
-            break;
-        }
+            let line_str = line_buffer.trim_end();
 
-        // 计算行在 mmap 中的字节范围
-        let end = if i + 1 < line_starts.len() {
-            line_starts[i + 1] - 1 // 到下一个换行符之前
-        } else {
-            mmap.len() // 文件末尾
-        };
+            let display_line = if *count > 1 {
+                format!("{} (x{})", line_str, count)
+            } else {
+                line_str.to_string()
+            };
 
-        // 如果 start 越界或行为空，则跳过
-        if start >= end {
-            continue;
-        }
-
-        let mut line_bytes = &mmap[start..end];
-        if line_bytes.last() == Some(&b'\r') {
-            line_bytes = &line_bytes[..line_bytes.len() - 1];
-        }
-
-        // 转换为 UTF-8 并计算哈希
-        if let Ok(line_str) = std::str::from_utf8(line_bytes) {
-            let hash = hash_line(line_str);
-
-            // 检查并移除（单线程，无需锁）
-            if let Some(count) = unique_hashes.remove(&hash) {
-                let display_line = if count > 1 {
-                    format!("{} (x{})", line_str, count)
-                } else {
-                    line_str.to_string()
-                };
-                if let Err(e) = app.emit("unique_line", UniqueLinePayload {
-                    file: file_id.to_string(),
-                    line_number: i + 1,
-                    text: display_line,
-                }) {
-                    eprintln!("Failed to emit unique_line event: {}", e);
-                }
+            if let Err(e) = app.emit("unique_line", UniqueLinePayload {
+                file: file_id.to_string(),
+                line_number: *line_number,
+                text: display_line,
+            }) {
+                eprintln!("Failed to emit unique_line event: {}", e);
             }
         }
     }
@@ -205,12 +231,12 @@ fn run_comparison(
 ) -> Result<(), std::io::Error> {
     let start_time = std::time::Instant::now();
 
-    // --- Step 1: 并行处理两个文件 ---
+    // --- Step 1: 并行处理两个文件，生成哈希计数和索引 ---
     let app_a = app.clone();
     let path_a_clone = file_a_path.clone();
     let handle_a = thread::spawn(move || {
         let now = std::time::Instant::now();
-        let result = generate_hash_counts(&app_a, &path_a_clone, "A");
+        let result = generate_hash_counts_and_index(&app_a, &path_a_clone, "A");
         (result, now.elapsed().as_millis())
     });
 
@@ -218,15 +244,15 @@ fn run_comparison(
     let path_b_clone = file_b_path.clone();
     let handle_b = thread::spawn(move || {
         let now = std::time::Instant::now();
-        let result = generate_hash_counts(&app_b, &path_b_clone, "B");
+        let result = generate_hash_counts_and_index(&app_b, &path_b_clone, "B");
         (result, now.elapsed().as_millis())
     });
 
-    // 等待线程完成并获取计数的HashMap
-    let (map_a_counts_res, pass1_a_ms) = handle_a.join().unwrap();
-    let (map_b_counts_res, pass1_b_ms) = handle_b.join().unwrap();
-    let map_a_counts = map_a_counts_res?;
-    let map_b_counts = map_b_counts_res?;
+    // 等待线程完成并获取计数的HashMap和索引
+    let (res_a, pass1_a_ms) = handle_a.join().unwrap();
+    let (res_b, pass1_b_ms) = handle_b.join().unwrap();
+    let (map_a_counts, index_a) = res_a?;
+    let (map_b_counts, index_b) = res_b?;
     app.emit("progress", ProgressPayload { percentage: 100.0, file: "A".to_string(), text: "Comparing Hashes".to_string() }).unwrap();
     println!("Pass 1: Complete.");
 
@@ -261,19 +287,19 @@ fn run_comparison(
     println!("Comparison complete.");
 
 
-    // --- PASS 2: 并行根据唯一的哈希取回行文本 ---
+    // --- PASS 2: 并行根据唯一的哈希和索引取回行文本 ---
     println!("Pass 2: Collecting unique lines...");
     let app_a_collect = app.clone();
     let handle_collect_a = thread::spawn(move || {
         let now = std::time::Instant::now();
-        let result = collect_unique_lines(&app_a_collect, &file_a_path, unique_to_a_counts, "A");
+        let result = collect_unique_lines_with_index(&app_a_collect, &file_a_path, unique_to_a_counts, &index_a, "A");
         (result, now.elapsed().as_millis())
     });
 
     let app_b_collect = app.clone();
     let handle_collect_b = thread::spawn(move || {
         let now = std::time::Instant::now();
-        let result = collect_unique_lines(&app_b_collect, &file_b_path, unique_to_b_counts, "B");
+        let result = collect_unique_lines_with_index(&app_b_collect, &file_b_path, unique_to_b_counts, &index_b, "B");
         (result, now.elapsed().as_millis())
     });
 
