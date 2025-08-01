@@ -42,8 +42,6 @@ struct ComparisonFinishedPayload {
     time_cost: TimeCost,
 }
 
-// --- 核心哈希逻辑没有变化 ---
-
 fn hash_line(line: &str) -> u64 {
     let mut hasher = GxHasher::default();
     // 将字符串的字节写入哈希器。
@@ -54,7 +52,6 @@ fn hash_line(line: &str) -> u64 {
 
 // --- Pass 1: 生成哈希计数和索引 (并行版) ---
 // 使用 rayon 和 memmap 并行处理文件行，以提高多核CPU利用率。
-// This function processes file lines in parallel using rayon and memmap to improve multi-core CPU utilization.
 fn generate_hash_counts_and_index(
     app: &AppHandle,
     file_path: &str,
