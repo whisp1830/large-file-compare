@@ -32,9 +32,9 @@ async function selectFile(fileVar: 'A' | 'B') {
   });
   if (selected) {
     if (fileVar === 'A') {
-      fileAPath.value = selected;
+      fileAPath.value = selected as string;
     } else {
-      fileBPath.value = selected;
+      fileBPath.value = selected as string;
     }
   }
 }
@@ -129,12 +129,11 @@ listen('comparison_finished', () => {
 
     <div v-if="comparisonDuration" class="comparison-time">
       <h3>Comparison Time: {{ comparisonDuration }}</h3>
-      <button @click="showDetails = !showDetails">Details</button>
-      <div v-if="showDetails && stepDetails.length" class="time-cost-details">
-        <p v-for="step in stepDetails" :key="step.step">
-          {{ step.step }}: {{ step.duration_ms }} ms
-        </p>
-      </div>
+    </div>
+    <button @click="showDetails = !showDetails">Details</button>
+    <div v-if="showDetails && stepDetails.length" class="details-log">
+      <h3>Details Log:</h3>
+      <pre v-for="(step, index) in stepDetails" :key="index">{{ step.step }}: {{ step.duration_ms }} ms</pre>
     </div>
 
     <div class="results-container">
@@ -179,18 +178,26 @@ listen('comparison_finished', () => {
   margin-top: 1rem;
 }
 
-.comparison-time button {
-  margin-left: 1rem;
+.comparison-time {
+  margin-top: 1rem;
 }
 
-.time-cost-details {
+.details-log {
   margin-top: 1rem;
   padding: 1rem;
   border: 1px solid #ccc;
   border-radius: 4px;
   background-color: #f9f9f9;
-  display: inline-block;
   text-align: left;
+  max-height: 200px;
+  overflow-y: auto;
+}
+.details-log pre {
+  margin: 0;
+  padding: 0.25rem 0;
+  font-family: monospace;
+  white-space: pre-wrap;
+  font-size: 0.85em;
 }
 
 .results-container {
