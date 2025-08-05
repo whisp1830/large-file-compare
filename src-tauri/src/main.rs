@@ -9,7 +9,6 @@ use std::io::{BufRead, BufReader, Error as IoError, Seek, SeekFrom};
 use std::thread;
 use tauri::{AppHandle, Emitter};
 use rayon::prelude::*;
-use memchr::memchr_iter;
 
 
 // --- Data Structures for Frontend Communication ---
@@ -29,18 +28,13 @@ struct UniqueLinePayload {
 }
 
 #[derive(Clone, serde::Serialize)]
-struct TimeCost {
-    pass1_a_ms: u128,
-    pass1_b_ms: u128,
-    hash_map_comparison_ms: u128,
-    pass2_a_ms: u128,
-    pass2_b_ms: u128,
+struct StepDetailPayload {
+    step: String,
+    duration_ms: u128,
 }
 
 #[derive(Clone, serde::Serialize)]
-struct ComparisonFinishedPayload {
-    time_cost: TimeCost,
-}
+struct ComparisonFinishedPayload {}
 
 fn hash_line(line: &str) -> u64 {
     let mut hasher = GxHasher::default();
@@ -48,6 +42,32 @@ fn hash_line(line: &str) -> u64 {
     hasher.write(line.as_bytes());
     // 完成哈希计算并返回结果。
     hasher.finish()
+}
+
+fn find_newline_positions_parallel(mmap: &Mmap) -> Vec<usize> {
+    const CHUNK_SIZE: usize = 16 * 1024 * 1024;
+
+    let mut positions: Vec<usize> = mmap
+        .par_chunks(CHUNK_SIZE)
+        .enumerate()
+        .flat_map(|(chunk_index, chunk)| {
+            let base_offset = chunk_index * CHUNK_SIZE;
+
+            // 1. 在当前块中串行查找，并计算出全局位置。
+            let local_positions: Vec<usize> = memchr::memchr_iter(b'\n', chunk)
+                .map(|local_pos| base_offset + local_pos)
+                .collect(); // 2. 将结果收集到一个临时的 Vec 中。
+
+            // 3. 将这个 Vec 转换为并行迭代器。
+            //    因为 Vec 是可以被分割的，所以这个操作是有效的。
+            local_positions.into_par_iter()
+        })
+        .collect(); // 这里会把所有块产生的位置收集到最终的 Vec 中
+
+    // 并行收集的结果是无序的，需要排序
+    positions.par_sort_unstable();
+
+    positions
 }
 
 // --- Pass 1: 生成哈希计数和索引 (并行版) ---
@@ -71,7 +91,7 @@ fn generate_hash_counts_and_index(
     let mmap = unsafe { Mmap::map(&file)? };
 
     // Find all line endings to define our work units
-    let newline_positions: Vec<usize> = memchr_iter(b'\n', &mmap).collect();
+    let newline_positions: Vec<usize> = find_newline_positions_parallel(&mmap);
     let total_lines = newline_positions.len();
 
     // Process all full lines in parallel
@@ -168,7 +188,7 @@ fn collect_unique_lines_with_index(
     file_id: &str,
 ) -> Result<(), IoError> {
     if unique_hashes.is_empty() {
-        return Ok(());
+        return Ok(())
     }
 
     let file = File::open(file_path)?;
@@ -247,7 +267,17 @@ fn run_comparison(
 
     // 等待线程完成并获取计数的HashMap和索引
     let (res_a, pass1_a_ms) = handle_a.join().unwrap();
+    app.emit("step_completed", StepDetailPayload {
+        step: "Pass 1 (File A)".to_string(),
+        duration_ms: pass1_a_ms,
+    }).unwrap();
+
     let (res_b, pass1_b_ms) = handle_b.join().unwrap();
+    app.emit("step_completed", StepDetailPayload {
+        step: "Pass 1 (File B)".to_string(),
+        duration_ms: pass1_b_ms,
+    }).unwrap();
+
     let (map_a_counts, index_a) = res_a?;
     let (map_b_counts, index_b) = res_b?;
     app.emit("progress", ProgressPayload { percentage: 100.0, file: "A".to_string(), text: "Comparing Hashes".to_string() }).unwrap();
@@ -292,6 +322,10 @@ fn run_comparison(
         }
     }
     let hash_map_comparison_ms = now.elapsed().as_millis();
+    app.emit("step_completed", StepDetailPayload {
+        step: "Hash Map Comparison".to_string(),
+        duration_ms: hash_map_comparison_ms,
+    }).unwrap();
     println!("Comparison complete.");
 
 
@@ -312,7 +346,17 @@ fn run_comparison(
     });
 
     let (res_a, pass2_a_ms) = handle_collect_a.join().unwrap();
+    app.emit("step_completed", StepDetailPayload {
+        step: "Pass 2 (File A)".to_string(),
+        duration_ms: pass2_a_ms,
+    }).unwrap();
+
     let (res_b, pass2_b_ms) = handle_collect_b.join().unwrap();
+    app.emit("step_completed", StepDetailPayload {
+        step: "Pass 2 (File B)".to_string(),
+        duration_ms: pass2_b_ms,
+    }).unwrap();
+
     res_a?;
     res_b?;
     app.emit("progress", ProgressPayload { percentage: 100.0, file: "B".to_string(), text: "Comparison Finished".to_string() }).unwrap();
@@ -320,14 +364,8 @@ fn run_comparison(
 
     // --- 最后一步: 发送最终结果 ---
     println!("Emitting final results...");
-    let time_cost = TimeCost {
-        pass1_a_ms,
-        pass1_b_ms,
-        hash_map_comparison_ms,
-        pass2_a_ms,
-        pass2_b_ms,
-    };
-    if let Err(e) = app.emit("comparison_finished", ComparisonFinishedPayload { time_cost }) {
+    if let Err(e) = app.emit("comparison_finished", ComparisonFinishedPayload {})
+     {
         eprintln!("Failed to emit comparison_finished event: {}", e);
     }
     println!("All done in {}ms.", start_time.elapsed().as_millis());

@@ -14,18 +14,15 @@ interface DiffLine {
   text: string;
 }
 
-interface TimeCost {
-  pass1_a_ms: number;
-  pass1_b_ms: number;
-  hash_map_comparison_ms: number;
-  pass2_a_ms: number;
-  pass2_b_ms: number;
+interface StepDetail {
+  step: string;
+  duration_ms: number;
 }
 
 const uniqueToA = ref<DiffLine[]>([]);
 const uniqueToB = ref<DiffLine[]>([]);
-const timeCost = ref<TimeCost | null>(null);
-const showTimeCost = ref(false);
+const stepDetails = ref<StepDetail[]>([]);
+const showDetails = ref(false);
 const comparisonStarted = ref(false);
 const comparisonDuration = ref<string | null>(null); // New reactive variable for duration
 
@@ -54,6 +51,8 @@ async function startComparison() {
   progressB.value = 0;
   uniqueToA.value = [];
   uniqueToB.value = [];
+  stepDetails.value = [];
+  showDetails.value = false;
   comparisonDuration.value = null; // Reset duration on new comparison
   progressText.value = "Starting...";
   startTime = Date.now(); // Record start time
@@ -84,9 +83,12 @@ listen('unique_line', (event) => {
   }
 });
 
-listen('comparison_finished', (event) => {
-  const payload = event.payload as { time_cost: TimeCost };
-  timeCost.value = payload.time_cost;
+listen('step_completed', (event) => {
+  const payload = event.payload as StepDetail;
+  stepDetails.value.push(payload);
+});
+
+listen('comparison_finished', () => {
   comparisonStarted.value = false; // Reset for next comparison
 
   if (startTime !== null) {
@@ -127,13 +129,11 @@ listen('comparison_finished', (event) => {
 
     <div v-if="comparisonDuration" class="comparison-time">
       <h3>Comparison Time: {{ comparisonDuration }}</h3>
-      <button @click="showTimeCost = !showTimeCost">Time Cost</button>
-      <div v-if="showTimeCost && timeCost" class="time-cost-details">
-        <p>Pass 1 (File A): {{ timeCost.pass1_a_ms }} ms</p>
-        <p>Pass 1 (File B): {{ timeCost.pass1_b_ms }} ms</p>
-        <p>Hash Map Comparison: {{ timeCost.hash_map_comparison_ms }} ms</p>
-        <p>Pass 2 (File A): {{ timeCost.pass2_a_ms }} ms</p>
-        <p>Pass 2 (File B): {{ timeCost.pass2_b_ms }} ms</p>
+      <button @click="showDetails = !showDetails">Details</button>
+      <div v-if="showDetails && stepDetails.length" class="time-cost-details">
+        <p v-for="step in stepDetails" :key="step.step">
+          {{ step.step }}: {{ step.duration_ms }} ms
+        </p>
       </div>
     </div>
 
@@ -189,6 +189,8 @@ listen('comparison_finished', (event) => {
   border: 1px solid #ccc;
   border-radius: 4px;
   background-color: #f9f9f9;
+  display: inline-block;
+  text-align: left;
 }
 
 .results-container {
