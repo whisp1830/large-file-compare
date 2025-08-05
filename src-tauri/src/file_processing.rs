@@ -1,21 +1,48 @@
 use crate::payloads::{ProgressPayload, StepDetailPayload, UniqueLinePayload};
-use gxhash::{GxHasher, HashMap, HashMapExt};
+use extsort::{ExternalSorter, Sortable};
+use gxhash::GxHasher;
 use memmap2::Mmap;
 use rayon::prelude::*;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::hash::Hasher;
-use std::io::{Error as IoError};
+use std::io::{BufWriter, Error as IoError, Read, Write};
+use std::path::Path;
 use std::time::Instant;
 use tauri::{AppHandle, Emitter};
 
 // Helper to emit step details to the frontend
 fn emit_step_detail(app: &AppHandle, file_id: &str, step_name: &str, duration_ms: u128) {
     let step_label = format!("File {} - {}", file_id, step_name);
-    if let Err(e) = app.emit("step_completed", StepDetailPayload {
-        step: step_label,
-        duration_ms,
-    }) {
+    if let Err(e) = app.emit(
+        "step_completed",
+        StepDetailPayload {
+            step: step_label,
+            duration_ms,
+        },
+    ) {
         eprintln!("Failed to emit step_completed event: {}", e);
+    }
+}
+
+#[derive(Debug, Eq, PartialEq, Ord, PartialOrd, Clone, Copy)]
+pub struct HashOffset(pub u64, pub u64);
+
+impl Sortable for HashOffset {
+    fn encode<W: Write>(&self, writer: &mut W) -> Result<(), IoError> {
+        writer.write_all(&self.0.to_le_bytes())?;
+        writer.write_all(&self.1.to_le_bytes())?;
+        Ok(())
+    }
+
+    fn decode<R: Read>(reader: &mut R) -> Result<Self, IoError> {
+        let mut hash_bytes = [0u8; 8];
+        reader.read_exact(&mut hash_bytes)?;
+        let mut offset_bytes = [0u8; 8];
+        reader.read_exact(&mut offset_bytes)?;
+        Ok(HashOffset(
+            u64::from_le_bytes(hash_bytes),
+            u64::from_le_bytes(offset_bytes),
+        ))
     }
 }
 
@@ -25,130 +52,118 @@ fn hash_line(line: &[u8]) -> u64 {
     hasher.finish()
 }
 
-// Single-pass hash generation.
-pub fn generate_hash_counts_and_index(
+pub fn create_sorted_hash_file(
     app: &AppHandle,
-    file_path: &str,
+    input_path: &str,
+    output_path: &Path,
     progress_file_id: &str,
-) -> Result<(HashMap<u64, usize>, HashMap<u64, u64>), IoError> {
+) -> Result<(), IoError> {
     let total_start = Instant::now();
-
-    let file = File::open(file_path)?;
+    let file = File::open(input_path)?;
     let file_size = file.metadata()?.len();
-    emit_step_detail(app, progress_file_id, "Opened file & read metadata", total_start.elapsed().as_millis());
+    emit_step_detail(
+        app,
+        progress_file_id,
+        "Opened file & read metadata",
+        total_start.elapsed().as_millis(),
+    );
 
     if file_size == 0 {
-        return Ok((HashMap::new(), HashMap::new()));
-    }
-
-    let _ = app.emit("progress", ProgressPayload { percentage: 0.0, file: progress_file_id.to_string(), text: format!("Hashing file {}...", progress_file_id) });
-
-    let mmap = unsafe { Mmap::map(&file)? };
-    emit_step_detail(app, progress_file_id, "Created memory map", total_start.elapsed().as_millis());
-
-    let now = Instant::now();
-    const CHUNK_SIZE: usize = 16 * 1024 * 1024; // 16MB
-
-    // Process chunks in parallel
-    let chunk_results: Vec<_> = mmap.par_chunks(CHUNK_SIZE).enumerate().map(|(chunk_idx, chunk)| {
-        let mut local_results = Vec::new();
-        let chunk_start_offset = (chunk_idx * CHUNK_SIZE) as u64;
-        let mut last_pos = 0;
-
-        for nl_pos in memchr::memchr_iter(b'\n', chunk) {
-            let offset = chunk_start_offset + last_pos as u64;
-            let line_bytes = &chunk[last_pos..nl_pos];
-            let line_bytes_cleaned = if line_bytes.last() == Some(&b'\r') { &line_bytes[..line_bytes.len() - 1] } else { line_bytes };
-
-            if !line_bytes_cleaned.is_empty() {
-                local_results.push((hash_line(line_bytes_cleaned), offset));
-            }
-            last_pos = nl_pos + 1;
-        }
-
-        // Return processed lines and the remainder of the chunk
-        (local_results, &chunk[last_pos..])
-    }).collect();
-    emit_step_detail(app, progress_file_id, "Parallel chunk processing", now.elapsed().as_millis());
-
-
-    let now = Instant::now();
-    // Stitch together remainders and process them
-    let mut stitched_lines = Vec::new();
-    let mut line_buffer = Vec::new();
-    let mut last_chunk_len = 0;
-
-    for (i, (_lines, remainder)) in chunk_results.iter().enumerate() {
-        let chunk_start_offset = (i * CHUNK_SIZE) as u64;
-        if !line_buffer.is_empty() {
-            // Find newline in the current remainder
-            if let Some(nl_pos) = memchr::memchr(b'\n', remainder) {
-                line_buffer.extend_from_slice(&remainder[..nl_pos]);
-                let offset = chunk_start_offset - last_chunk_len as u64 + line_buffer.iter().position(|&b| b != 0).unwrap_or(0) as u64;
-                let cleaned_buffer = if line_buffer.last() == Some(&b'\r') { &line_buffer[..line_buffer.len() - 1] } else { &line_buffer[..] };
-                if !cleaned_buffer.is_empty() {
-                    stitched_lines.push((hash_line(cleaned_buffer), offset));
-                }
-                line_buffer.clear();
-            } else {
-                line_buffer.extend_from_slice(remainder);
-            }
-        }
-        // Start new buffer with the current remainder if it's not empty
-        if !remainder.is_empty() && memchr::memchr(b'\n', remainder).is_none() {
-            line_buffer.extend_from_slice(remainder);
-            last_chunk_len = remainder.len();
-        }
-    }
-
-    // Process final remainder if any
-    if !line_buffer.is_empty() {
-        let offset = file_size - line_buffer.len() as u64;
-        let cleaned_buffer = if line_buffer.last() == Some(&b'\r') { &line_buffer[..line_buffer.len() - 1] } else { &line_buffer[..] };
-        if !cleaned_buffer.is_empty() {
-            stitched_lines.push((hash_line(cleaned_buffer), offset));
-        }
-    }
-    emit_step_detail(app, progress_file_id, "Stitched chunk remainders", now.elapsed().as_millis());
-
-
-    let now = Instant::now();
-    // Aggregate results
-    let mut line_counts: HashMap<u64, usize> = HashMap::new();
-    let mut line_index: HashMap<u64, u64> = HashMap::new();
-
-    let all_lines = chunk_results.into_iter().flat_map(|(lines, _)| lines).chain(stitched_lines);
-
-    for (hash, offset) in all_lines {
-        *line_counts.entry(hash).or_insert(0) += 1;
-        line_index.entry(hash).or_insert(offset);
-    }
-    emit_step_detail(app, progress_file_id, "Aggregated results", now.elapsed().as_millis());
-    emit_step_detail(app, progress_file_id, "Total Hashing/Indexing Time", total_start.elapsed().as_millis());
-
-    Ok((line_counts, line_index))
-}
-
-
-pub fn collect_unique_lines_with_index(
-    app: &AppHandle,
-    file_path: &str,
-    unique_hashes: HashMap<u64, usize>,
-    hash_to_offset: &HashMap<u64, u64>,
-    file_id: &str,
-) -> Result<(), IoError> {
-    if unique_hashes.is_empty() {
+        File::create(output_path)?;
         return Ok(());
     }
 
+    let _ = app.emit(
+        "progress",
+        ProgressPayload {
+            percentage: 0.0,
+            file: progress_file_id.to_string(),
+            text: format!("Hashing file {}...", progress_file_id),
+        },
+    );
+
+    let mmap = unsafe { Mmap::map(&file)? };
+    emit_step_detail(
+        app,
+        progress_file_id,
+        "Created memory map",
+        total_start.elapsed().as_millis(),
+    );
+
+    let now = Instant::now();
+    let sorter = ExternalSorter::new();
+
+    const CHUNK_SIZE: usize = 32 * 1024 * 1024;
+
+    let mmap_ptr = mmap.as_ptr() as usize;
+    let all_items: Vec<_> = mmap.par_chunks(CHUNK_SIZE).flat_map(move |chunk| {
+        let mut lines = Vec::new();
+        let mut last_pos = 0;
+        for nl_pos in memchr::memchr_iter(b'\n', chunk) {
+            let line_bytes = &chunk[last_pos..nl_pos];
+            let line_bytes_cleaned = if line_bytes.last() == Some(&b'\r') {
+                &line_bytes[..line_bytes.len() - 1]
+            } else {
+                line_bytes
+            };
+            if !line_bytes_cleaned.is_empty() {
+                let hash = hash_line(line_bytes_cleaned);
+                let global_offset =
+                    (chunk.as_ptr() as usize - mmap_ptr + last_pos) as u64;
+                lines.push(HashOffset(hash, global_offset));
+            }
+            last_pos = nl_pos + 1;
+        }
+        lines
+    }).collect();
+
+    let sorted_iter = sorter.sort(all_items.into_iter()).unwrap();
+
+    emit_step_detail(
+        app,
+        progress_file_id,
+        "Parallel hashing and in-memory sort",
+        now.elapsed().as_millis(),
+    );
+
+    let now = Instant::now();
+    let output_file =
+        OpenOptions::new().write(true).create(true).truncate(true).open(output_path)?;
+    let mut buf_writer = BufWriter::new(output_file);
+    for item in sorted_iter {
+        item?.encode(&mut buf_writer)?;
+    }
+    emit_step_detail(
+        app,
+        progress_file_id,
+        "External merge sort",
+        now.elapsed().as_millis(),
+    );
+
+    emit_step_detail(
+        app,
+        progress_file_id,
+        "Total Hashing/Sorting Time",
+        total_start.elapsed().as_millis(),
+    );
+
+    Ok(())
+}
+
+pub fn collect_unique_lines(
+    app: &AppHandle,
+    file_path: &str,
+    unique_offsets: &[(u64, usize)], // List of (offset, count)
+    file_id: &str,
+) -> Result<(), IoError> {
+    if unique_offsets.is_empty() {
+        return Ok(())
+    }
+
     let file = File::open(file_path)?;
     let mmap = unsafe { Mmap::map(&file)? };
 
-    // Create a sorted list of offsets to read sequentially
-    let mut sorted_unique_offsets: Vec<(u64, usize)> = unique_hashes
-        .iter()
-        .filter_map(|(hash, count)| hash_to_offset.get(hash).map(|offset| (*offset, *count)))
-        .collect();
+    let mut sorted_unique_offsets = unique_offsets.to_vec();
     sorted_unique_offsets.sort_unstable_by_key(|k| k.0);
 
     let mut last_scan_offset: usize = 0;
@@ -157,14 +172,13 @@ pub fn collect_unique_lines_with_index(
     for (offset, count) in sorted_unique_offsets {
         let current_offset = offset as usize;
 
-        // Count newlines from the last scanned position to the current offset
-        let newlines_in_between = memchr::memchr_iter(b'\n', &mmap[last_scan_offset..current_offset]).count();
+        let newlines_in_between =
+            memchr::memchr_iter(b'\n', &mmap[last_scan_offset..current_offset]).count();
         let line_number = last_line_number + newlines_in_between + 1;
 
-        // Find the end of the current line
         let line_end = memchr::memchr(b'\n', &mmap[current_offset..])
             .map_or(mmap.len(), |pos| current_offset + pos);
-        
+
         let line_bytes = &mmap[current_offset..line_end];
         let line_str = String::from_utf8_lossy(line_bytes).trim_end().to_string();
 
@@ -174,16 +188,19 @@ pub fn collect_unique_lines_with_index(
             line_str
         };
 
-        if let Err(e) = app.emit("unique_line", UniqueLinePayload {
-            file: file_id.to_string(),
-            line_number,
-            text: display_line,
-        }) {
+        if let Err(e) = app.emit(
+            "unique_line",
+            UniqueLinePayload {
+                file: file_id.to_string(),
+                line_number,
+                text: display_line,
+            },
+        ) {
             eprintln!("Failed to emit unique_line event: {}", e);
         }
 
         last_scan_offset = current_offset;
-        last_line_number = line_number -1;
+        last_line_number = line_number - 1;
     }
 
     Ok(())
