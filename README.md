@@ -11,15 +11,28 @@ A high-performance desktop application for comparing extremely large text files,
 
 ## How It Works
 
-The application leverages the power of Rust on the backend to achieve high performance and memory efficiency.
+The application leverages the power of Rust on the backend, combined with an external sort-based algorithm, to achieve high performance and memory efficiency. This allows it to compare files that are significantly larger than the available system RAM.
 
-- **Memory-Mapped Files:** Instead of loading entire files into memory, it uses `memmap2` to map files directly into virtual memory. This allows the operating system to handle paging and enables processing of files larger than the available RAM.
-- **Parallel Processing:** It utilizes the `rayon` crate to process file lines across multiple CPU cores in parallel, significantly speeding up the hashing process.
-- **Two-Pass Hashing Algorithm:**
-    1.  **Pass 1 (Hashing & Counting):** The application reads both files in parallel. For each line, it computes a fast hash using `gxhash` and stores a count of how many times each hash appears. It also keeps an index of the first occurrence (offset and line number) of each hash. This pass identifies which lines are candidates for being unique without storing the lines themselves.
-    2.  **Pass 2 (Collecting Unique Lines):** After comparing the hash counts, the application identifies the hashes that are unique to each file. It then uses the pre-built index to seek directly to the position of those unique lines in the files and reads them to display the final results.
+The core process is broken down into three main stages:
 
-This approach minimizes memory usage and I/O, making the comparison process extremely fast and scalable.
+1.  **Parallel Hashing & External Sorting (Map Phase):**
+    *   The application processes both input files concurrently in separate threads.
+    *   For each file, it uses memory-mapping (`memmap2`) to avoid loading the entire file into RAM.
+    *   The file is processed in parallel chunks using `rayon`. For each line, a fast hash is computed using `gxhash`, and a `(hash, original_offset)` pair is created.
+    *   These pairs are sorted using the `extsort` library, which performs an efficient external sort. This means it can sort datasets larger than RAM by spilling sorted chunks to temporary files on disk and then merging them.
+    *   This stage results in two temporary files, one for each input file, containing all the line hashes sorted numerically.
+
+2.  **Merge & Compare (Reduce Phase):**
+    *   The two sorted hash files are read simultaneously, and their hashes are compared line by line.
+    *   By comparing the sorted streams, the application can efficiently identify differences. If a hash from one file doesn't have a matching hash in the other, it's unique. If a hash appears a different number of times in each file, the surplus is counted as unique.
+    *   This stage produces a list of offsets pointing to the unique lines in the original files.
+
+3.  **Collect Unique Lines:**
+    *   Using the list of unique offsets generated in the previous step, the application again uses memory-mapping to access the original files.
+    *   It seeks directly to the specific offsets of the unique lines to read their content.
+    *   The line text, its original line number, and its occurrence count are then sent to the frontend for display.
+
+This sort-based approach minimizes memory usage by keeping the full file content on disk and only working with lightweight hashes and offsets in memory or in temporary sorted files. This makes the comparison process extremely fast and scalable.
 
 ## Recommended IDE Setup
 
