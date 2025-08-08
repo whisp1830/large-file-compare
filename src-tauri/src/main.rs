@@ -5,7 +5,9 @@ use std::thread;
 use tauri::AppHandle;
 
 mod comparison;
+mod comparison_in_memory;
 mod file_processing;
+mod file_processing_in_memory;
 mod payloads;
 
 #[tauri::command]
@@ -13,12 +15,22 @@ async fn start_comparison(
     app: AppHandle,
     file_a_path: String,
     file_b_path: String,
+    use_external_sort: bool,
+    ignore_sequence: bool
 ) -> Result<(), String> {
     thread::spawn(move || {
-        if let Err(e) = comparison::run_comparison(app, file_a_path, file_b_path) {
-            // Handle errors, maybe emit an event to the frontend
-            eprintln!("Comparison failed: {}", e);
+        if (use_external_sort) {
+            if let Err(e) = comparison::run_comparison(app, file_a_path, file_b_path) {
+                // Handle errors, maybe emit an event to the frontend
+                eprintln!("Comparison failed: {}", e);
+            }
+        } else {
+            if let Err(e) = comparison_in_memory::run_comparison(app, file_a_path, file_b_path) {
+                // Handle errors, maybe emit an event to the frontend
+                eprintln!("Comparison failed: {}", e);
+            }
         }
+
     });
     Ok(())
 }
