@@ -121,7 +121,9 @@ listen('comparison_finished', () => {
 
     <div class="options-container">
       <input type="checkbox" id="useExternalSort" v-model="useExternalSort" />
-      <label for="useExternalSort">使用外排序 (Use External Sort)</label>
+      <label for="useExternalSort">use external sort</label>
+      <input type="checkbox" id="ignoreSequence" v-model="ignoreSequence" />
+      <label for="ignoreSequence">ignore sequence difference</label>
     </div>
 
     <button @click="startComparison" :disabled="comparisonStarted || !fileAPath || !fileBPath">
