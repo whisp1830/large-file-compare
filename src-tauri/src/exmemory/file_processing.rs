@@ -52,6 +52,26 @@ fn hash_line(line: &[u8]) -> u64 {
     hasher.finish()
 }
 
+fn find_newline_positions_parallel(mmap: &Mmap) -> Vec<usize> {
+    const CHUNK_SIZE: usize = 16 * 1024 * 1024;
+
+    let mmap_ptr = mmap.as_ptr() as usize;
+    let mut positions: Vec<usize> = mmap
+        .par_chunks(CHUNK_SIZE)
+        .flat_map(|chunk| {
+            let chunk_start_offset = chunk.as_ptr() as usize - mmap_ptr;
+            let local_positions: Vec<usize> = memchr::memchr_iter(b'\n', chunk)
+                .map(move |pos| chunk_start_offset + pos)
+                .collect();
+            local_positions.into_par_iter()
+        })
+        .collect();
+
+    positions.par_sort_unstable();
+    positions
+}
+
+
 pub fn create_sorted_hash_file(
     app: &AppHandle,
     input_path: &str,
@@ -70,7 +90,7 @@ pub fn create_sorted_hash_file(
 
     if file_size == 0 {
         File::create(output_path)?;
-        return Ok(());
+        return Ok(())
     }
 
     let _ = app.emit(
@@ -91,39 +111,58 @@ pub fn create_sorted_hash_file(
     );
 
     let now = Instant::now();
-    let sorter = ExternalSorter::new();
+    let newline_positions = find_newline_positions_parallel(&mmap);
+    let total_lines = newline_positions.len();
+    emit_step_detail(app, progress_file_id, "Found all newline positions", now.elapsed().as_millis());
 
-    const CHUNK_SIZE: usize = 32 * 1024 * 1024;
-
-    let mmap_ptr = mmap.as_ptr() as usize;
-    let all_items: Vec<_> = mmap.par_chunks(CHUNK_SIZE).flat_map(move |chunk| {
-        let mut lines = Vec::new();
-        let mut last_pos = 0;
-        for nl_pos in memchr::memchr_iter(b'\n', chunk) {
-            let line_bytes = &chunk[last_pos..nl_pos];
-            let line_bytes_cleaned = if line_bytes.last() == Some(&b'\r') {
-                &line_bytes[..line_bytes.len() - 1]
-            } else {
-                line_bytes
-            };
-            if !line_bytes_cleaned.is_empty() {
+    let now_processing = Instant::now();
+    let mut all_items: Vec<HashOffset> = if total_lines > 0 {
+        (0..total_lines)
+            .into_par_iter()
+            .filter_map(|i| {
+                let start = if i == 0 { 0 } else { newline_positions[i - 1] + 1 };
+                let end = newline_positions[i];
+                let line_bytes = &mmap[start..end];
+                let line_bytes_cleaned = if line_bytes.last() == Some(&b'\r') {
+                    &line_bytes[..line_bytes.len() - 1]
+                } else {
+                    line_bytes
+                };
+                if line_bytes_cleaned.is_empty() {
+                    return None;
+                }
                 let hash = hash_line(line_bytes_cleaned);
-                let global_offset =
-                    (chunk.as_ptr() as usize - mmap_ptr + last_pos) as u64;
-                lines.push(HashOffset(hash, global_offset));
-            }
-            last_pos = nl_pos + 1;
-        }
-        lines
-    }).collect();
+                let offset = start as u64;
+                Some(HashOffset(hash, offset))
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
 
+    // Handle remainder of the file (the part after the last newline)
+    let last_newline_pos = newline_positions.last().map_or(0, |p| p + 1);
+    if last_newline_pos < mmap.len() {
+        let remainder = &mmap[last_newline_pos..];
+        let line_bytes_cleaned = if remainder.last() == Some(&b'\r') {
+            &remainder[..remainder.len() - 1]
+        } else {
+            remainder
+        };
+        if !line_bytes_cleaned.is_empty() {
+            let hash = hash_line(line_bytes_cleaned);
+            all_items.push(HashOffset(hash, last_newline_pos as u64));
+        }
+    }
+
+    let sorter = ExternalSorter::new();
     let sorted_iter = sorter.sort(all_items.into_iter()).unwrap();
 
     emit_step_detail(
         app,
         progress_file_id,
-        "Parallel hashing and in-memory sort",
-        now.elapsed().as_millis(),
+        "Parallel hashing and ex-memory sort",
+        now_processing.elapsed().as_millis(),
     );
 
     let now = Instant::now();
