@@ -1,5 +1,5 @@
-use crate::payloads::{ProgressPayload, StepDetailPayload, UniqueLinePayload};
-use extsort::{ExternalSorter, Sortable};
+use crate::payloads::{StepDetailPayload, UniqueLinePayload};
+use extsort::Sortable;
 use gxhash::GxHasher;
 use memmap2::Mmap;
 use rayon::prelude::*;
@@ -7,8 +7,6 @@ use std::fs::{File, OpenOptions};
 use std::hash::Hasher;
 use std::io::{BufWriter, Error as IoError, Read, Write};
 use std::path::Path;
-use std::sync::mpsc;
-use std::thread;
 use std::time::Instant;
 use tauri::{AppHandle, Emitter};
 
@@ -29,6 +27,8 @@ fn emit_step_detail(app: &AppHandle, file_id: &str, step_name: &str, duration_ms
 #[derive(Debug, Eq, PartialEq, Ord, PartialOrd, Clone, Copy)]
 pub struct HashOffset(pub u64, pub u64);
 
+// We keep the Sortable trait implementation as it provides a convenient
+// binary encoding/decoding format for writing to our partition files.
 impl Sortable for HashOffset {
     fn encode<W: Write>(&self, writer: &mut W) -> Result<(), IoError> {
         writer.write_all(&self.0.to_le_bytes())?;
@@ -58,77 +58,52 @@ fn find_newline_positions_parallel(mmap: &Mmap) -> Vec<usize> {
     const CHUNK_SIZE: usize = 16 * 1024 * 1024;
 
     let mmap_ptr = mmap.as_ptr() as usize;
-    let positions: Vec<usize> = mmap
-        .par_chunks(CHUNK_SIZE)
+    mmap.par_chunks(CHUNK_SIZE)
         .flat_map(|chunk| {
             let chunk_start_offset = chunk.as_ptr() as usize - mmap_ptr;
-            let local_positions: Vec<usize> = memchr::memchr_iter(b'\n', chunk)
+            memchr::memchr_iter(b'\n', chunk)
                 .map(move |pos| chunk_start_offset + pos)
-                .collect();
-            local_positions.into_par_iter()
+                .collect::<Vec<_>>()
         })
-        .collect();
-
-    positions
+        .collect()
 }
 
-pub fn create_sorted_hash_file(
+pub const NUM_PARTITIONS: u64 = 256;
+
+/// Partitions a file into smaller files based on the hash of each line.
+pub fn partition_file(
     app: &AppHandle,
     input_path: &str,
-    output_path: &Path,
+    output_dir: &Path,
     progress_file_id: &str,
 ) -> Result<(), IoError> {
     let total_start = Instant::now();
+    emit_step_detail(app, progress_file_id, "Partitioning Started", 0);
+
+    // --- Setup ---
     let file = File::open(input_path)?;
     let file_size = file.metadata()?.len();
-    emit_step_detail(
-        app,
-        progress_file_id,
-        "Opened file & read metadata",
-        total_start.elapsed().as_millis(),
-    );
-
     if file_size == 0 {
-        File::create(output_path)?;
-        return Ok(());
+        return Ok(())
     }
-
-    let _ = app.emit(
-        "progress",
-        ProgressPayload {
-            percentage: 0.0,
-            file: progress_file_id.to_string(),
-            text: format!("Hashing file {}...", progress_file_id),
-        },
-    );
-
     let mmap = unsafe { Mmap::map(&file)? };
-    emit_step_detail(
-        app,
-        progress_file_id,
-        "Created memory map",
-        total_start.elapsed().as_millis(),
-    );
+    std::fs::create_dir_all(output_dir)?;
 
+    // --- Find lines ---
     let now = Instant::now();
     let mut newline_positions = find_newline_positions_parallel(&mmap);
-    newline_positions.par_sort_unstable();
-    emit_step_detail(
-        app,
-        progress_file_id,
-        "Found and sorted all newline positions",
-        now.elapsed().as_millis(),
-    );
+    newline_positions.par_sort_unstable(); // Sorting is needed to process lines correctly
+    emit_step_detail(app, progress_file_id, "Found & Sorted Newlines", now.elapsed().as_millis());
 
-    let now_processing = Instant::now();
-
-    const CHANNEL_BUFFER_SIZE: usize = 1_000_000;
-    let (sender, receiver) = mpsc::sync_channel(CHANNEL_BUFFER_SIZE);
-
-    let scope_result = thread::scope(|s| {
-        s.spawn(|| {
-            let total_lines = newline_positions.len();
-            (0..total_lines).into_par_iter().for_each_with(sender, |s, i| {
+    // --- Parallel Partitioning ---
+    // Each thread will create a vector of HashOffsets for each partition.
+    // This avoids lock contention on file writers.
+    let now = Instant::now();
+    let partitioned_data: Vec<Vec<HashOffset>> = (0..newline_positions.len())
+        .into_par_iter()
+        .fold(
+            || vec![Vec::new(); NUM_PARTITIONS as usize],
+            |mut thread_local_partitions, i| {
                 let start = if i == 0 { 0 } else { newline_positions[i - 1] + 1 };
                 let end = newline_positions[i];
                 let line_bytes = &mmap[start..end];
@@ -137,91 +112,53 @@ pub fn create_sorted_hash_file(
                 } else {
                     line_bytes
                 };
+
                 if !line_bytes_cleaned.is_empty() {
                     let hash = hash_line(line_bytes_cleaned);
                     let offset = start as u64;
-                    if s.send(HashOffset(hash, offset)).is_err() {
-                        // Receiver has dropped, stop sending
-                    }
+                    let partition_index = (hash % NUM_PARTITIONS) as usize;
+                    thread_local_partitions[partition_index].push(HashOffset(hash, offset));
                 }
-            });
-        });
-
-        let last_newline_pos = newline_positions.last().map_or(0, |p| p + 1);
-        let remainder_item = if last_newline_pos < mmap.len() {
-            let remainder = &mmap[last_newline_pos..];
-            let line_bytes_cleaned = if remainder.last() == Some(&b'\r') {
-                &remainder[..remainder.len() - 1]
-            } else {
-                remainder
-            };
-            if !line_bytes_cleaned.is_empty() {
-                let hash = hash_line(line_bytes_cleaned);
-                Some(HashOffset(hash, last_newline_pos as u64))
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        let sorter = ExternalSorter::new();
-        let combined_iter = receiver.into_iter().chain(remainder_item.into_iter());
-        let sorted_iter = match sorter.sort(combined_iter) {
-            Ok(iter) => iter,
-            Err(e) => return Err(e),
-        };
-
-        emit_step_detail(
-            app,
-            progress_file_id,
-            "Parallel hashing and streaming to sorter",
-            now_processing.elapsed().as_millis(),
+                thread_local_partitions
+            },
+        )
+        .reduce(
+            || vec![Vec::new(); NUM_PARTITIONS as usize],
+            |mut combined_partitions, thread_local_partitions| {
+                for (i, part_data) in thread_local_partitions.into_iter().enumerate() {
+                    combined_partitions[i].extend(part_data);
+                }
+                combined_partitions
+            },
         );
+    emit_step_detail(app, progress_file_id, "In-Memory Partitioning", now.elapsed().as_millis());
 
-        let now_write = Instant::now();
-        let output_file = match OpenOptions::new().write(true).create(true).truncate(true).open(output_path) {
-            Ok(file) => file,
-            Err(e) => return Err(e),
-        };
-        let mut buf_writer = BufWriter::new(output_file);
-        for item_result in sorted_iter {
-            match item_result {
-                Ok(item) => {
-                    if let Err(e) = item.encode(&mut buf_writer) {
-                        return Err(e);
-                    }
-                } 
-                Err(e) => return Err(e),
+
+    // --- Write Partitions to Disk ---
+    // This is done sequentially per partition to maximize write performance.
+    let now = Instant::now();
+    partitioned_data
+        .into_par_iter()
+        .enumerate()
+        .try_for_each(|(i, data)| -> Result<(), IoError> {
+            if data.is_empty() {
+                return Ok(())
             }
-        }
-        if let Err(e) = buf_writer.flush() {
-            return Err(e);
-        }
-
-        emit_step_detail(
-            app,
-            progress_file_id,
-            "External merge sort and write",
-            now_write.elapsed().as_millis(),
-        );
-        
-        Ok(())
-    });
-
-    match scope_result {
-        Ok(result) => {
-            emit_step_detail(
-                app,
-                progress_file_id,
-                "Total Hashing/Sorting Time",
-                total_start.elapsed().as_millis(),
-            );
+            let part_path = output_dir.join(format!("part_{}", i));
+            let file = OpenOptions::new().write(true).create(true).truncate(true).open(part_path)?;
+            let mut writer = BufWriter::new(file);
+            for item in data {
+                item.encode(&mut writer)?;
+            }
+            writer.flush()?;
             Ok(())
-        },
-        Err(panic) => std::panic::resume_unwind(Box::new(panic))
-    }
+        })?;
+    emit_step_detail(app, progress_file_id, "Writing Partitions to Disk", now.elapsed().as_millis());
+
+    emit_step_detail(app, progress_file_id, "Total Partitioning Time", total_start.elapsed().as_millis());
+    Ok(())
 }
+
 
 pub fn collect_unique_lines(
     app: &AppHandle,
@@ -245,6 +182,10 @@ pub fn collect_unique_lines(
     for (offset, count) in sorted_unique_offsets {
         let current_offset = offset as usize;
 
+        // This logic is slow if offsets are far apart.
+        // A better way would be to find the line number from the offset directly
+        // if we had a pre-computed index of newline positions.
+        // For now, we keep it simple.
         let newlines_in_between =
             memchr::memchr_iter(b'\n', &mmap[last_scan_offset..current_offset]).count();
         let line_number = last_line_number + newlines_in_between + 1;
