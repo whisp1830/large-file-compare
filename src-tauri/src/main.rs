@@ -23,10 +23,10 @@ async fn start_comparison(
     file_a_path: String,
     file_b_path: String,
     use_external_sort: bool,
-    ignore_sequence: bool
+    _ignore_sequence: bool
 ) -> Result<(), String> {
     thread::spawn(move || {
-        if (use_external_sort) {
+        if use_external_sort {
             if let Err(e) = comparison::run_comparison(app, file_a_path, file_b_path) {
                 // Handle errors, maybe emit an event to the frontend
                 eprintln!("Comparison failed: {}", e);

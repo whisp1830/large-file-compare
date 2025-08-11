@@ -7,6 +7,8 @@ use std::fs::{File, OpenOptions};
 use std::hash::Hasher;
 use std::io::{BufWriter, Error as IoError, Read, Write};
 use std::path::Path;
+use std::sync::mpsc;
+use std::thread;
 use std::time::Instant;
 use tauri::{AppHandle, Emitter};
 
@@ -56,7 +58,7 @@ fn find_newline_positions_parallel(mmap: &Mmap) -> Vec<usize> {
     const CHUNK_SIZE: usize = 16 * 1024 * 1024;
 
     let mmap_ptr = mmap.as_ptr() as usize;
-    let mut positions: Vec<usize> = mmap
+    let positions: Vec<usize> = mmap
         .par_chunks(CHUNK_SIZE)
         .flat_map(|chunk| {
             let chunk_start_offset = chunk.as_ptr() as usize - mmap_ptr;
@@ -67,10 +69,8 @@ fn find_newline_positions_parallel(mmap: &Mmap) -> Vec<usize> {
         })
         .collect();
 
-    positions.par_sort_unstable();
     positions
 }
-
 
 pub fn create_sorted_hash_file(
     app: &AppHandle,
@@ -90,7 +90,7 @@ pub fn create_sorted_hash_file(
 
     if file_size == 0 {
         File::create(output_path)?;
-        return Ok(())
+        return Ok(());
     }
 
     let _ = app.emit(
@@ -111,15 +111,24 @@ pub fn create_sorted_hash_file(
     );
 
     let now = Instant::now();
-    let newline_positions = find_newline_positions_parallel(&mmap);
-    let total_lines = newline_positions.len();
-    emit_step_detail(app, progress_file_id, "Found all newline positions", now.elapsed().as_millis());
+    let mut newline_positions = find_newline_positions_parallel(&mmap);
+    newline_positions.par_sort_unstable();
+    emit_step_detail(
+        app,
+        progress_file_id,
+        "Found and sorted all newline positions",
+        now.elapsed().as_millis(),
+    );
 
     let now_processing = Instant::now();
-    let mut all_items: Vec<HashOffset> = if total_lines > 0 {
-        (0..total_lines)
-            .into_par_iter()
-            .filter_map(|i| {
+
+    const CHANNEL_BUFFER_SIZE: usize = 1_000_000;
+    let (sender, receiver) = mpsc::sync_channel(CHANNEL_BUFFER_SIZE);
+
+    let scope_result = thread::scope(|s| {
+        s.spawn(|| {
+            let total_lines = newline_positions.len();
+            (0..total_lines).into_par_iter().for_each_with(sender, |s, i| {
                 let start = if i == 0 { 0 } else { newline_positions[i - 1] + 1 };
                 let end = newline_positions[i];
                 let line_bytes = &mmap[start..end];
@@ -128,65 +137,90 @@ pub fn create_sorted_hash_file(
                 } else {
                     line_bytes
                 };
-                if line_bytes_cleaned.is_empty() {
-                    return None;
+                if !line_bytes_cleaned.is_empty() {
+                    let hash = hash_line(line_bytes_cleaned);
+                    let offset = start as u64;
+                    if s.send(HashOffset(hash, offset)).is_err() {
+                        // Receiver has dropped, stop sending
+                    }
                 }
+            });
+        });
+
+        let last_newline_pos = newline_positions.last().map_or(0, |p| p + 1);
+        let remainder_item = if last_newline_pos < mmap.len() {
+            let remainder = &mmap[last_newline_pos..];
+            let line_bytes_cleaned = if remainder.last() == Some(&b'\r') {
+                &remainder[..remainder.len() - 1]
+            } else {
+                remainder
+            };
+            if !line_bytes_cleaned.is_empty() {
                 let hash = hash_line(line_bytes_cleaned);
-                let offset = start as u64;
-                Some(HashOffset(hash, offset))
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
-
-    // Handle remainder of the file (the part after the last newline)
-    let last_newline_pos = newline_positions.last().map_or(0, |p| p + 1);
-    if last_newline_pos < mmap.len() {
-        let remainder = &mmap[last_newline_pos..];
-        let line_bytes_cleaned = if remainder.last() == Some(&b'\r') {
-            &remainder[..remainder.len() - 1]
+                Some(HashOffset(hash, last_newline_pos as u64))
+            } else {
+                None
+            }
         } else {
-            remainder
+            None
         };
-        if !line_bytes_cleaned.is_empty() {
-            let hash = hash_line(line_bytes_cleaned);
-            all_items.push(HashOffset(hash, last_newline_pos as u64));
+
+        let sorter = ExternalSorter::new();
+        let combined_iter = receiver.into_iter().chain(remainder_item.into_iter());
+        let sorted_iter = match sorter.sort(combined_iter) {
+            Ok(iter) => iter,
+            Err(e) => return Err(e),
+        };
+
+        emit_step_detail(
+            app,
+            progress_file_id,
+            "Parallel hashing and streaming to sorter",
+            now_processing.elapsed().as_millis(),
+        );
+
+        let now_write = Instant::now();
+        let output_file = match OpenOptions::new().write(true).create(true).truncate(true).open(output_path) {
+            Ok(file) => file,
+            Err(e) => return Err(e),
+        };
+        let mut buf_writer = BufWriter::new(output_file);
+        for item_result in sorted_iter {
+            match item_result {
+                Ok(item) => {
+                    if let Err(e) = item.encode(&mut buf_writer) {
+                        return Err(e);
+                    }
+                } 
+                Err(e) => return Err(e),
+            }
         }
+        if let Err(e) = buf_writer.flush() {
+            return Err(e);
+        }
+
+        emit_step_detail(
+            app,
+            progress_file_id,
+            "External merge sort and write",
+            now_write.elapsed().as_millis(),
+        );
+        
+        Ok(())
+    });
+
+    match scope_result {
+        Ok(result) => {
+            emit_step_detail(
+                app,
+                progress_file_id,
+                "Total Hashing/Sorting Time",
+                total_start.elapsed().as_millis(),
+            );
+            Ok(())
+        },
+        Err(panic) => std::panic::resume_unwind(Box::new(panic))
     }
-
-    let sorter = ExternalSorter::new();
-    let sorted_iter = sorter.sort(all_items.into_iter()).unwrap();
-
-    emit_step_detail(
-        app,
-        progress_file_id,
-        "Parallel hashing and ex-memory sort",
-        now_processing.elapsed().as_millis(),
-    );
-
-    let now = Instant::now();
-    let output_file =
-        OpenOptions::new().write(true).create(true).truncate(true).open(output_path)?;
-    let mut buf_writer = BufWriter::new(output_file);
-    for item in sorted_iter {
-        item?.encode(&mut buf_writer)?;
-    }
-    emit_step_detail(
-        app,
-        progress_file_id,
-        "External merge sort",
-        now.elapsed().as_millis(),
-    );
-
-    emit_step_detail(
-        app,
-        progress_file_id,
-        "Total Hashing/Sorting Time",
-        total_start.elapsed().as_millis(),
-    );
-
-    Ok(())
 }
 
 pub fn collect_unique_lines(
