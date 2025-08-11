@@ -1,4 +1,4 @@
-use crate::file_processing::{collect_unique_lines, create_sorted_hash_file, HashOffset};
+use crate::exmemory::file_processing::{collect_unique_lines, create_sorted_hash_file, HashOffset};
 use crate::payloads::{ComparisonFinishedPayload, ProgressPayload, StepDetailPayload};
 use extsort::Sortable;
 use std::fs::File;

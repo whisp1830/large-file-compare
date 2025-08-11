@@ -3,11 +3,18 @@
 
 use std::thread;
 use tauri::AppHandle;
+use crate::exmemory::comparison;
+use crate::inmemory::comparison_in_memory;
 
-mod comparison;
-mod comparison_in_memory;
-mod file_processing;
-mod file_processing_in_memory;
+mod exmemory {
+    pub mod comparison;
+    pub mod file_processing;
+}
+
+mod inmemory {
+    pub mod comparison_in_memory;
+    pub mod file_processing_in_memory;
+}
 mod payloads;
 
 #[tauri::command]

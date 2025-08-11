@@ -1,4 +1,4 @@
-use crate::file_processing_in_memory::{collect_unique_lines_with_index, generate_hash_counts_and_index};
+use crate::inmemory::file_processing_in_memory::{collect_unique_lines_with_index, generate_hash_counts_and_index};
 use crate::payloads::{ComparisonFinishedPayload, ProgressPayload, StepDetailPayload};
 use gxhash::{HashMap, HashMapExt};
 use std::thread;
