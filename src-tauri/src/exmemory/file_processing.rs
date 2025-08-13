@@ -58,14 +58,22 @@ fn find_newline_positions_parallel(mmap: &Mmap) -> Vec<usize> {
     const CHUNK_SIZE: usize = 16 * 1024 * 1024;
 
     let mmap_ptr = mmap.as_ptr() as usize;
-    mmap.par_chunks(CHUNK_SIZE)
-        .flat_map(|chunk| {
+    let list_of_vectors: Vec<Vec<usize>> = mmap.par_chunks(CHUNK_SIZE)
+        .map(|chunk| {
             let chunk_start_offset = chunk.as_ptr() as usize - mmap_ptr;
             memchr::memchr_iter(b'\n', chunk)
                 .map(move |pos| chunk_start_offset + pos)
                 .collect::<Vec<_>>()
         })
-        .collect()
+        .collect();
+
+    let total_positions = list_of_vectors.iter().map(|v| v.len()).sum();
+    let mut result = Vec::with_capacity(total_positions);
+    for vec in list_of_vectors {
+        result.extend(vec);
+    }
+
+    result
 }
 
 pub const NUM_PARTITIONS: u64 = 256;
@@ -92,7 +100,6 @@ pub fn partition_file(
     // --- Find lines ---
     let now = Instant::now();
     let mut newline_positions = find_newline_positions_parallel(&mmap);
-    newline_positions.par_sort_unstable(); // Sorting is needed to process lines correctly
     emit_step_detail(app, progress_file_id, "Found & Sorted Newlines", now.elapsed().as_millis());
 
     // --- Parallel Partitioning ---
