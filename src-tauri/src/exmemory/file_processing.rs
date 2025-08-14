@@ -7,6 +7,7 @@ use std::fs::{File, OpenOptions};
 use std::hash::Hasher;
 use std::io::{BufWriter, Error as IoError, Read, Write};
 use std::path::Path;
+use std::sync::Mutex;
 use std::time::Instant;
 use tauri::{AppHandle, Emitter};
 
@@ -79,12 +80,13 @@ fn find_newline_positions_parallel(mmap: &Mmap) -> Vec<usize> {
 pub const NUM_PARTITIONS: u64 = 256;
 
 /// Partitions a file into smaller files based on the hash of each line.
+/// Returns a vector of newline positions for later use.
 pub fn partition_file(
     app: &AppHandle,
     input_path: &str,
     output_dir: &Path,
     progress_file_id: &str,
-) -> Result<(), IoError> {
+) -> Result<Vec<usize>, IoError> {
     let total_start = Instant::now();
     emit_step_detail(app, progress_file_id, "Partitioning Started", 0);
 
@@ -92,88 +94,69 @@ pub fn partition_file(
     let file = File::open(input_path)?;
     let file_size = file.metadata()?.len();
     if file_size == 0 {
-        return Ok(())
+        return Ok(Vec::new());
     }
     let mmap = unsafe { Mmap::map(&file)? };
     std::fs::create_dir_all(output_dir)?;
 
     // --- Find lines ---
     let now = Instant::now();
-    let mut newline_positions = find_newline_positions_parallel(&mmap);
-    emit_step_detail(app, progress_file_id, "Found & Sorted Newlines", now.elapsed().as_millis());
+    let newline_positions = find_newline_positions_parallel(&mmap);
+    emit_step_detail(app, progress_file_id, "Found Newlines", now.elapsed().as_millis());
 
-    // --- Parallel Partitioning ---
-    // Each thread will create a vector of HashOffsets for each partition.
-    // This avoids lock contention on file writers.
+    // --- Parallel Partitioning and Writing ---
+    // Create a writer for each partition file, protected by a Mutex for thread-safe access.
     let now = Instant::now();
-    let partitioned_data: Vec<Vec<HashOffset>> = (0..newline_positions.len())
-        .into_par_iter()
-        .fold(
-            || vec![Vec::new(); NUM_PARTITIONS as usize],
-            |mut thread_local_partitions, i| {
-                let start = if i == 0 { 0 } else { newline_positions[i - 1] + 1 };
-                let end = newline_positions[i];
-                let line_bytes = &mmap[start..end];
-                let line_bytes_cleaned = if line_bytes.last() == Some(&b'\r') {
-                    &line_bytes[..line_bytes.len() - 1]
-                } else {
-                    line_bytes
-                };
-
-                if !line_bytes_cleaned.is_empty() {
-                    let hash = hash_line(line_bytes_cleaned);
-                    let offset = start as u64;
-                    let partition_index = (hash % NUM_PARTITIONS) as usize;
-                    thread_local_partitions[partition_index].push(HashOffset(hash, offset));
-                }
-                thread_local_partitions
-            },
-        )
-        .reduce(
-            || vec![Vec::new(); NUM_PARTITIONS as usize],
-            |mut combined_partitions, thread_local_partitions| {
-                for (i, part_data) in thread_local_partitions.into_iter().enumerate() {
-                    combined_partitions[i].extend(part_data);
-                }
-                combined_partitions
-            },
-        );
-    emit_step_detail(app, progress_file_id, "In-Memory Partitioning", now.elapsed().as_millis());
-
-
-    // --- Write Partitions to Disk ---
-    // This is done sequentially per partition to maximize write performance.
-    let now = Instant::now();
-    partitioned_data
-        .into_par_iter()
-        .enumerate()
-        .try_for_each(|(i, data)| -> Result<(), IoError> {
-            if data.is_empty() {
-                return Ok(())
-            }
+    let writers: Vec<_> = (0..NUM_PARTITIONS)
+        .map(|i| {
             let part_path = output_dir.join(format!("part_{}", i));
             let file = OpenOptions::new().write(true).create(true).truncate(true).open(part_path)?;
-            let mut writer = BufWriter::new(file);
-            for item in data {
-                item.encode(&mut writer)?;
+            Ok(Mutex::new(BufWriter::new(file)))
+        })
+        .collect::<Result<Vec<_>, IoError>>()?;
+
+    // Iterate over lines in parallel, hash them, and write (hash, offset) to the correct partition file.
+    // This avoids collecting all HashOffsets in memory.
+    (0..newline_positions.len())
+        .into_par_iter()
+        .try_for_each(|i| -> Result<(), IoError> {
+            let start = if i == 0 { 0 } else { newline_positions[i - 1] + 1 };
+            let end = newline_positions[i];
+            let line_bytes = &mmap[start..end];
+            let line_bytes_cleaned = if line_bytes.last() == Some(&b'\r') {
+                &line_bytes[..line_bytes.len() - 1]
+            } else {
+                line_bytes
+            };
+
+            if !line_bytes_cleaned.is_empty() {
+                let hash = hash_line(line_bytes_cleaned);
+                let offset = start as u64;
+                let partition_index = (hash % NUM_PARTITIONS) as usize;
+
+                // Lock the writer for the target partition and write the encoded data.
+                let mut writer_guard = writers[partition_index].lock().unwrap();
+                HashOffset(hash, offset).encode(&mut *writer_guard)?;
             }
-            writer.flush()?;
             Ok(())
         })?;
-    emit_step_detail(app, progress_file_id, "Writing Partitions to Disk", now.elapsed().as_millis());
+    emit_step_detail(app, progress_file_id, "Hashing and Writing Partitions", now.elapsed().as_millis());
 
     emit_step_detail(app, progress_file_id, "Total Partitioning Time", total_start.elapsed().as_millis());
-    Ok(())
+    Ok(newline_positions)
 }
+
 
 
 pub fn collect_unique_lines(
     app: &AppHandle,
     file_path: &str,
     unique_offsets: &[(u64, usize)], // List of (offset, count)
+    newline_positions: &[usize],
     file_id: &str,
 ) -> Result<(), IoError> {
-    if unique_offsets.is_empty() {
+    let now = Instant::now();
+    if unique_offsets.is_empty() || newline_positions.is_empty() {
         return Ok(())
     }
 
@@ -183,19 +166,13 @@ pub fn collect_unique_lines(
     let mut sorted_unique_offsets = unique_offsets.to_vec();
     sorted_unique_offsets.sort_unstable_by_key(|k| k.0);
 
-    let mut last_scan_offset: usize = 0;
-    let mut last_line_number: usize = 0;
-
     for (offset, count) in sorted_unique_offsets {
         let current_offset = offset as usize;
 
-        // This logic is slow if offsets are far apart.
-        // A better way would be to find the line number from the offset directly
-        // if we had a pre-computed index of newline positions.
-        // For now, we keep it simple.
-        let newlines_in_between =
-            memchr::memchr_iter(b'\n', &mmap[last_scan_offset..current_offset]).count();
-        let line_number = last_line_number + newlines_in_between + 1;
+        // Efficiently find the line number using a binary search on the newline positions.
+        // `partition_point` is faster than `binary_search` for this purpose.
+        // It finds the index of the first newline position greater than the current offset.
+        let line_number = newline_positions.partition_point(|&p| p < current_offset) + 1;
 
         let line_end = memchr::memchr(b'\n', &mmap[current_offset..])
             .map_or(mmap.len(), |pos| current_offset + pos);
@@ -219,10 +196,8 @@ pub fn collect_unique_lines(
         ) {
             eprintln!("Failed to emit unique_line event: {}", e);
         }
-
-        last_scan_offset = current_offset;
-        last_line_number = line_number - 1;
     }
 
+    emit_step_detail(app, file_id, "Collecting Unique Lines", now.elapsed().as_millis());
     Ok(())
 }

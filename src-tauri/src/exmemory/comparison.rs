@@ -1,7 +1,7 @@
 use crate::exmemory::file_processing::{collect_unique_lines, partition_file, HashOffset, NUM_PARTITIONS};
 use crate::payloads::{ComparisonFinishedPayload, ProgressPayload, StepDetailPayload};
 use extsort::Sortable;
-use gxhash::{HashMap, HashSet};
+use gxhash::{HashMap};
 use rayon::prelude::*;
 use std::fs::{self, File};
 use std::io::{BufReader, Error as IoError};
@@ -36,7 +36,7 @@ pub fn run_comparison(
     app: AppHandle,
     file_a_path: String,
     file_b_path: String,
-    compare_config: CompareConfig,
+    _compare_config: CompareConfig,
 ) -> Result<(), IoError> {
     let start_time = std::time::Instant::now();
     let temp_dir = std::env::temp_dir().join(format!("bcomp_{}", start_time.elapsed().as_nanos()));
@@ -44,6 +44,7 @@ pub fn run_comparison(
     let temp_dir_b = temp_dir.join("b");
 
     // --- Step 1: Partition files in parallel ---
+    // This now returns the newline positions for each file.
     let app_a = app.clone();
     let path_a_clone = file_a_path.clone();
     let temp_dir_a_clone = temp_dir_a.clone();
@@ -58,8 +59,9 @@ pub fn run_comparison(
         partition_file(&app_b, &path_b_clone, &temp_dir_b_clone, "B")
     });
 
-    handle_a.join().unwrap()?;
-    handle_b.join().unwrap()?;
+    // Wait for partitioning to finish and get the newline positions
+    let newline_positions_a = handle_a.join().unwrap()?;
+    let newline_positions_b = handle_b.join().unwrap()?;
     app.emit("progress", ProgressPayload { percentage: 50.0, file: "A".to_string(), text: "Aggregating partitions...".to_string() }).unwrap();
 
     // --- Step 2: Compare partitions in parallel ---
@@ -119,14 +121,15 @@ pub fn run_comparison(
 
 
     // --- Step 3: Collect unique lines ---
+    // Pass the newline positions to the collection threads.
     let app_a_collect = app.clone();
     let handle_collect_a = thread::spawn(move || {
-        collect_unique_lines(&app_a_collect, &file_a_path, &unique_to_a, "A")
+        collect_unique_lines(&app_a_collect, &file_a_path, &unique_to_a, &newline_positions_a, "A")
     });
 
     let app_b_collect = app.clone();
     let handle_collect_b = thread::spawn(move || {
-        collect_unique_lines(&app_b_collect, &file_b_path, &unique_to_b, "B")
+        collect_unique_lines(&app_b_collect, &file_b_path, &unique_to_b, &newline_positions_b, "B")
     });
 
     handle_collect_a.join().unwrap()?;

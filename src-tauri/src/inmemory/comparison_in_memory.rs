@@ -9,7 +9,7 @@ pub fn run_comparison(
     app: AppHandle,
     file_a_path: String,
     file_b_path: String,
-    compare_config: CompareConfig,
+    _compare_config: CompareConfig,
 ) -> Result<(), std::io::Error> {
     let start_time = std::time::Instant::now();
 
