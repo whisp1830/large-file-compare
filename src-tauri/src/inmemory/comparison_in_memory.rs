@@ -3,11 +3,13 @@ use crate::payloads::{ComparisonFinishedPayload, ProgressPayload, StepDetailPayl
 use gxhash::{HashMap, HashMapExt};
 use std::thread;
 use tauri::{AppHandle, Emitter};
+use crate::CompareConfig;
 
 pub fn run_comparison(
     app: AppHandle,
     file_a_path: String,
     file_b_path: String,
+    compare_config: CompareConfig,
 ) -> Result<(), std::io::Error> {
     let start_time = std::time::Instant::now();
 

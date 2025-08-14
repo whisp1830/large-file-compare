@@ -7,7 +7,7 @@ import { open } from '@tauri-apps/plugin-dialog';
 const fileAPath = ref("");
 const fileBPath = ref("");
 const useExternalSort = ref(false);
-const ignoreSequence = ref(true);
+const ignoreOccurences = ref(true);
 const progressA = ref(0);
 const progressB = ref(0);
 const progressText = ref("Starting...");
@@ -63,7 +63,7 @@ async function startComparison() {
     fileAPath: fileAPath.value,
     fileBPath: fileBPath.value,
     useExternalSort: useExternalSort.value,
-    ignoreSequence: ignoreSequence.value
+    ignoreOccurences: ignoreOccurences.value
   });
 }
 
@@ -122,8 +122,8 @@ listen('comparison_finished', () => {
     <div class="options-container">
       <input type="checkbox" id="useExternalSort" v-model="useExternalSort" />
       <label for="useExternalSort">use external sort</label>
-      <input type="checkbox" id="ignoreSequence" v-model="ignoreSequence" />
-      <label for="ignoreSequence">ignore sequence difference</label>
+      <input type="checkbox" id="ignoreOccurences" v-model="ignoreOccurences" />
+      <label for="ignoreOccurences">ignore occurences</label>
     </div>
 
     <button @click="startComparison" :disabled="comparisonStarted || !fileAPath || !fileBPath">

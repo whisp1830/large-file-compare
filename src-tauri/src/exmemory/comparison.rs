@@ -1,7 +1,7 @@
 use crate::exmemory::file_processing::{collect_unique_lines, partition_file, HashOffset, NUM_PARTITIONS};
 use crate::payloads::{ComparisonFinishedPayload, ProgressPayload, StepDetailPayload};
 use extsort::Sortable;
-use gxhash::HashMap;
+use gxhash::{HashMap, HashSet};
 use rayon::prelude::*;
 use std::fs::{self, File};
 use std::io::{BufReader, Error as IoError};
@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use tauri::{AppHandle, Emitter};
+use crate::CompareConfig;
 
 fn read_partition_into_maps(
     partition_path: PathBuf,
@@ -35,6 +36,7 @@ pub fn run_comparison(
     app: AppHandle,
     file_a_path: String,
     file_b_path: String,
+    compare_config: CompareConfig,
 ) -> Result<(), IoError> {
     let start_time = std::time::Instant::now();
     let temp_dir = std::env::temp_dir().join(format!("bcomp_{}", start_time.elapsed().as_nanos()));

@@ -17,22 +17,29 @@ mod inmemory {
 }
 mod payloads;
 
+
+struct CompareConfig {
+    use_external_sort: bool,
+    ignore_occurences: bool
+}
+
 #[tauri::command]
 async fn start_comparison(
     app: AppHandle,
     file_a_path: String,
     file_b_path: String,
     use_external_sort: bool,
-    _ignore_sequence: bool
+    ignore_occurences: bool
 ) -> Result<(), String> {
+    let compare_config = CompareConfig {use_external_sort, ignore_occurences};
     thread::spawn(move || {
-        if use_external_sort {
-            if let Err(e) = comparison::run_comparison(app, file_a_path, file_b_path) {
+        if compare_config.use_external_sort {
+            if let Err(e) = comparison::run_comparison(app, file_a_path, file_b_path, compare_config) {
                 // Handle errors, maybe emit an event to the frontend
                 eprintln!("Comparison failed: {}", e);
             }
         } else {
-            if let Err(e) = comparison_in_memory::run_comparison(app, file_a_path, file_b_path) {
+            if let Err(e) = comparison_in_memory::run_comparison(app, file_a_path, file_b_path, compare_config) {
                 // Handle errors, maybe emit an event to the frontend
                 eprintln!("Comparison failed: {}", e);
             }
