@@ -36,7 +36,7 @@ pub fn run_comparison(
     app: AppHandle,
     file_a_path: String,
     file_b_path: String,
-    _compare_config: CompareConfig,
+    compare_config: CompareConfig,
 ) -> Result<(), IoError> {
     let start_time = std::time::Instant::now();
     let temp_dir = std::env::temp_dir().join(format!("bcomp_{}", start_time.elapsed().as_nanos()));
@@ -48,20 +48,26 @@ pub fn run_comparison(
     let app_a = app.clone();
     let path_a_clone = file_a_path.clone();
     let temp_dir_a_clone = temp_dir_a.clone();
-    let handle_a = thread::spawn(move || {
-        partition_file(&app_a, &path_a_clone, &temp_dir_a_clone, "A")
-    });
-
     let app_b = app.clone();
     let path_b_clone = file_b_path.clone();
     let temp_dir_b_clone = temp_dir_b.clone();
-    let handle_b = thread::spawn(move || {
-        partition_file(&app_b, &path_b_clone, &temp_dir_b_clone, "B")
-    });
+    if compare_config.use_single_thread {
+        partition_file(&app_a, &path_a_clone, &temp_dir_a_clone, "A")?;
+        partition_file(&app_b, &path_b_clone, &temp_dir_b_clone, "B")?;
+    } else {
+        let handle_a_thread = thread::spawn(move || {
+            partition_file(&app_a, &path_a_clone, &temp_dir_a_clone, "A")
+        });
+        let handle_b_thread = thread::spawn(move || {
+            partition_file(&app_b, &path_b_clone, &temp_dir_b_clone, "B")
+        });
+        handle_a_thread.join().unwrap()?;
+        handle_b_thread.join().unwrap()?;
+    }
+
 
     // Wait for partitioning to finish and get the newline positions
-    let newline_positions_a = handle_a.join().unwrap()?;
-    let newline_positions_b = handle_b.join().unwrap()?;
+
     app.emit("progress", ProgressPayload { percentage: 50.0, file: "A".to_string(), text: "Aggregating partitions...".to_string() }).unwrap();
 
     // --- Step 2: Compare partitions in parallel ---
@@ -124,12 +130,12 @@ pub fn run_comparison(
     // Pass the newline positions to the collection threads.
     let app_a_collect = app.clone();
     let handle_collect_a = thread::spawn(move || {
-        collect_unique_lines(&app_a_collect, &file_a_path, &unique_to_a, &newline_positions_a, "A")
+        collect_unique_lines(&app_a_collect, &file_a_path, &unique_to_a, "A")
     });
 
     let app_b_collect = app.clone();
     let handle_collect_b = thread::spawn(move || {
-        collect_unique_lines(&app_b_collect, &file_b_path, &unique_to_b, &newline_positions_b, "B")
+        collect_unique_lines(&app_b_collect, &file_b_path, &unique_to_b, "B")
     });
 
     handle_collect_a.join().unwrap()?;

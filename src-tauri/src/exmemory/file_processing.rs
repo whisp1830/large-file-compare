@@ -86,7 +86,7 @@ pub fn partition_file(
     input_path: &str,
     output_dir: &Path,
     progress_file_id: &str,
-) -> Result<Vec<usize>, IoError> {
+) -> Result<(),  IoError> {
     let total_start = Instant::now();
     emit_step_detail(app, progress_file_id, "Partitioning Started", 0);
 
@@ -94,7 +94,7 @@ pub fn partition_file(
     let file = File::open(input_path)?;
     let file_size = file.metadata()?.len();
     if file_size == 0 {
-        return Ok(Vec::new());
+        return Ok(());
     }
     let mmap = unsafe { Mmap::map(&file)? };
     std::fs::create_dir_all(output_dir)?;
@@ -143,7 +143,7 @@ pub fn partition_file(
     emit_step_detail(app, progress_file_id, "Hashing and Writing Partitions", now.elapsed().as_millis());
 
     emit_step_detail(app, progress_file_id, "Total Partitioning Time", total_start.elapsed().as_millis());
-    Ok(newline_positions)
+    Ok(())
 }
 
 
@@ -152,11 +152,10 @@ pub fn collect_unique_lines(
     app: &AppHandle,
     file_path: &str,
     unique_offsets: &[(u64, usize)], // List of (offset, count)
-    newline_positions: &[usize],
     file_id: &str,
 ) -> Result<(), IoError> {
     let now = Instant::now();
-    if unique_offsets.is_empty() || newline_positions.is_empty() {
+    if unique_offsets.is_empty() {
         return Ok(())
     }
 
@@ -172,7 +171,6 @@ pub fn collect_unique_lines(
         // Efficiently find the line number using a binary search on the newline positions.
         // `partition_point` is faster than `binary_search` for this purpose.
         // It finds the index of the first newline position greater than the current offset.
-        let line_number = newline_positions.partition_point(|&p| p < current_offset) + 1;
 
         let line_end = memchr::memchr(b'\n', &mmap[current_offset..])
             .map_or(mmap.len(), |pos| current_offset + pos);
@@ -190,8 +188,8 @@ pub fn collect_unique_lines(
             "unique_line",
             UniqueLinePayload {
                 file: file_id.to_string(),
-                line_number,
                 text: display_line,
+                line_number: 0,
             },
         ) {
             eprintln!("Failed to emit unique_line event: {}", e);
