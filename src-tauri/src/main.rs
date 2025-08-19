@@ -22,6 +22,7 @@ struct CompareConfig {
     use_external_sort: bool,
     ignore_occurences: bool,
     use_single_thread: bool,
+    ignore_line_number: bool,
 }
 
 #[tauri::command]
@@ -31,9 +32,10 @@ async fn start_comparison(
     file_b_path: String,
     use_external_sort: bool,
     ignore_occurences: bool,
-    use_single_thread: bool
+    use_single_thread: bool,
+    ignore_line_number: bool
 ) -> Result<(), String> {
-    let compare_config = CompareConfig {use_external_sort, ignore_occurences, use_single_thread};
+    let compare_config = CompareConfig {use_external_sort, ignore_occurences, use_single_thread, ignore_line_number};
     thread::spawn(move || {
         if compare_config.use_external_sort {
             if let Err(e) = comparison::run_comparison(app, file_a_path, file_b_path, compare_config) {

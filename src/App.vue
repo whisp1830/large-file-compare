@@ -9,6 +9,7 @@ const fileBPath = ref("");
 const useExternalSort = ref(true);
 const ignoreOccurences = ref(true);
 const useSingleThread = ref(false);
+const ignoreLineNumber = ref(false);
 const progressA = ref(0);
 const progressB = ref(0);
 const progressText = ref("Starting...");
@@ -65,7 +66,8 @@ async function startComparison() {
     fileBPath: fileBPath.value,
     useExternalSort: useExternalSort.value,
     ignoreOccurences: ignoreOccurences.value,
-    useSingleThread: useSingleThread.value // 1. Pass the new option to the backend
+    useSingleThread: useSingleThread.value,
+    ignoreLineNumber: ignoreLineNumber.value// 1. Pass the new option to the backend
   });
 }
 
@@ -128,6 +130,8 @@ listen('comparison_finished', () => {
       <label for="ignoreOccurences">ignore occurences</label>
       <input type="checkbox" id="useSingleThread" v-model="useSingleThread" />
       <label for="useSingleThread">use single thread</label>
+      <input type="checkbox" id="ignoreLineNumber" v-model="ignoreLineNumber" />
+      <label for="ignoreLineNumber">ignore line number</label>
     </div>
 
     <button @click="startComparison" :disabled="comparisonStarted || !fileAPath || !fileBPath">

@@ -10,6 +10,7 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::time::Instant;
 use tauri::{AppHandle, Emitter};
+use crate::CompareConfig;
 
 // Helper to emit step details to the frontend
 fn emit_step_detail(app: &AppHandle, file_id: &str, step_name: &str, duration_ms: u128) {
@@ -152,6 +153,7 @@ pub fn collect_unique_lines(
     app: &AppHandle,
     file_path: &str,
     unique_offsets: &[(u64, usize)], // List of (offset, count)
+    compare_config: &CompareConfig,
     file_id: &str,
 ) -> Result<(), IoError> {
     let now = Instant::now();

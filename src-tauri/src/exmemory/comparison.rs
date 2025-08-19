@@ -130,12 +130,12 @@ pub fn run_comparison(
     // Pass the newline positions to the collection threads.
     let app_a_collect = app.clone();
     let handle_collect_a = thread::spawn(move || {
-        collect_unique_lines(&app_a_collect, &file_a_path, &unique_to_a, "A")
+        collect_unique_lines(&app_a_collect, &file_a_path, &unique_to_a, &compare_config, "A")
     });
 
     let app_b_collect = app.clone();
     let handle_collect_b = thread::spawn(move || {
-        collect_unique_lines(&app_b_collect, &file_b_path, &unique_to_b, "B")
+        collect_unique_lines(&app_b_collect, &file_b_path, &unique_to_b, &compare_config, "B")
     });
 
     handle_collect_a.join().unwrap()?;
