@@ -111,7 +111,7 @@ pub fn partition_file(
         .map(|i| {
             let part_path = output_dir.join(format!("part_{}", i));
             let file = OpenOptions::new().write(true).create(true).truncate(true).open(part_path)?;
-            Ok(Mutex::new(BufWriter::new(file)))
+            Ok(Mutex::new(BufWriter::with_capacity(4 * 1024 * 1024, file)))
         })
         .collect::<Result<Vec<_>, IoError>>()?;
 

@@ -6,8 +6,9 @@ import { open } from '@tauri-apps/plugin-dialog';
 
 const fileAPath = ref("");
 const fileBPath = ref("");
-const useExternalSort = ref(false);
+const useExternalSort = ref(true);
 const ignoreOccurences = ref(true);
+const useSingleThread = ref(false);
 const progressA = ref(0);
 const progressB = ref(0);
 const progressText = ref("Starting...");
@@ -63,7 +64,8 @@ async function startComparison() {
     fileAPath: fileAPath.value,
     fileBPath: fileBPath.value,
     useExternalSort: useExternalSort.value,
-    ignoreOccurences: ignoreOccurences.value
+    ignoreOccurences: ignoreOccurences.value,
+    useSingleThread: useSingleThread.value // 1. Pass the new option to the backend
   });
 }
 
@@ -124,6 +126,8 @@ listen('comparison_finished', () => {
       <label for="useExternalSort">use external sort</label>
       <input type="checkbox" id="ignoreOccurences" v-model="ignoreOccurences" />
       <label for="ignoreOccurences">ignore occurences</label>
+      <input type="checkbox" id="useSingleThread" v-model="useSingleThread" />
+      <label for="useSingleThread">use single thread</label>
     </div>
 
     <button @click="startComparison" :disabled="comparisonStarted || !fileAPath || !fileBPath">
@@ -182,6 +186,11 @@ listen('comparison_finished', () => {
   display: flex;
   align-items: center;
   justify-content: center;
+  gap: 5px; /* Added for better spacing between checkbox and label */
+}
+
+.options-container label {
+  margin-right: 15px; /* Added for better spacing between options */
 }
 
 .file-path {
@@ -210,6 +219,7 @@ listen('comparison_finished', () => {
   max-height: 200px;
   overflow-y: auto;
 }
+
 .details-log pre {
   margin: 0;
   padding: 0.25rem 0;
