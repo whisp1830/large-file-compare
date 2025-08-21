@@ -1,4 +1,4 @@
-use crate::exmemory::file_processing::{collect_unique_lines, partition_file, HashOffset, NUM_PARTITIONS};
+use crate::external::file_processing::{collect_unique_lines, partition_file, HashOffset, NUM_PARTITIONS};
 use crate::payloads::{ComparisonFinishedPayload, ProgressPayload, StepDetailPayload};
 use extsort::Sortable;
 use gxhash::{HashMap};
@@ -129,13 +129,15 @@ pub fn run_comparison(
     // --- Step 3: Collect unique lines ---
     // Pass the newline positions to the collection threads.
     let app_a_collect = app.clone();
+    let config_for_a = compare_config.clone();
     let handle_collect_a = thread::spawn(move || {
-        collect_unique_lines(&app_a_collect, &file_a_path, &unique_to_a, &compare_config, "A")
+        collect_unique_lines(&app_a_collect, &file_a_path, &unique_to_a, &config_for_a, "A")
     });
 
     let app_b_collect = app.clone();
+    let config_for_b = compare_config.clone();
     let handle_collect_b = thread::spawn(move || {
-        collect_unique_lines(&app_b_collect, &file_b_path, &unique_to_b, &compare_config, "B")
+        collect_unique_lines(&app_b_collect, &file_b_path, &unique_to_b, &config_for_b, "B")
     });
 
     handle_collect_a.join().unwrap()?;

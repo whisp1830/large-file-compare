@@ -3,21 +3,21 @@
 
 use std::thread;
 use tauri::AppHandle;
-use crate::exmemory::comparison;
-use crate::inmemory::comparison_in_memory;
+use crate::external::comparison;
+use crate::internal::comparison_in_memory;
 
-mod exmemory {
+mod external {
     pub mod comparison;
     pub mod file_processing;
 }
 
-mod inmemory {
+mod internal {
     pub mod comparison_in_memory;
     pub mod file_processing_in_memory;
 }
 mod payloads;
 
-
+#[derive(Clone)]
 struct CompareConfig {
     use_external_sort: bool,
     ignore_occurences: bool,
