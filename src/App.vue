@@ -157,13 +157,13 @@ listen('comparison_finished', () => {
 
     <div class="results-container">
       <div class="result-pane">
-        <h2>Unique to File A</h2>
+        <h2>Unique to File A ({{ uniqueToA.length }} lines)</h2>
         <div class="diff-output">
           <pre v-for="line in uniqueToA" :key="line.line_number" class="diff-line removed"><code><span class="line-number">{{ line.line_number }}</span>- {{ line.text }}</code></pre>
         </div>
       </div>
       <div class="result-pane">
-        <h2>Unique to File B</h2>
+        <h2>Unique to File B ({{ uniqueToB.length }} lines)</h2>
         <div class="diff-output">
           <pre v-for="line in uniqueToB" :key="line.line_number" class="diff-line added"><code><span class="line-number">{{ line.line_number }}</span>+ {{ line.text }}</code></pre>
         </div>
