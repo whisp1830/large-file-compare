@@ -1,4 +1,5 @@
 use crate::payloads::{StepDetailPayload, UniqueLinePayload};
+use crate::CompareConfig;
 use extsort::Sortable;
 use gxhash::GxHasher;
 use memmap2::Mmap;
@@ -6,11 +7,10 @@ use rayon::prelude::*;
 use std::fs::{File, OpenOptions};
 use std::hash::Hasher;
 use std::io::{BufWriter, Error as IoError, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Instant;
 use tauri::{AppHandle, Emitter};
-use crate::CompareConfig;
 
 // Helper to emit step details to the frontend
 fn emit_step_detail(app: &AppHandle, file_id: &str, step_name: &str, duration_ms: u128) {
@@ -29,8 +29,6 @@ fn emit_step_detail(app: &AppHandle, file_id: &str, step_name: &str, duration_ms
 #[derive(Debug, Eq, PartialEq, Ord, PartialOrd, Clone, Copy)]
 pub struct HashOffset(pub u64, pub u64);
 
-// We keep the Sortable trait implementation as it provides a convenient
-// binary encoding/decoding format for writing to our partition files.
 impl Sortable for HashOffset {
     fn encode<W: Write>(&self, writer: &mut W) -> Result<(), IoError> {
         writer.write_all(&self.0.to_le_bytes())?;
@@ -80,33 +78,28 @@ fn find_newline_positions_parallel(mmap: &Mmap) -> Vec<usize> {
 
 pub const NUM_PARTITIONS: u64 = 256;
 
-/// Partitions a file into smaller files based on the hash of each line.
-/// Returns a vector of newline positions for later use.
 pub fn partition_file(
     app: &AppHandle,
     input_path: &str,
     output_dir: &Path,
     progress_file_id: &str,
-) -> Result<(),  IoError> {
+    compare_config: &CompareConfig,
+) -> Result<Option<PathBuf>, IoError> {
     let total_start = Instant::now();
     emit_step_detail(app, progress_file_id, "Partitioning Started", 0);
 
-    // --- Setup ---
     let file = File::open(input_path)?;
     let file_size = file.metadata()?.len();
     if file_size == 0 {
-        return Ok(());
+        return Ok(None);
     }
     let mmap = unsafe { Mmap::map(&file)? };
     std::fs::create_dir_all(output_dir)?;
 
-    // --- Find lines ---
     let now = Instant::now();
     let newline_positions = find_newline_positions_parallel(&mmap);
     emit_step_detail(app, progress_file_id, "Found Newlines", now.elapsed().as_millis());
 
-    // --- Parallel Partitioning and Writing ---
-    // Create a writer for each partition file, protected by a Mutex for thread-safe access.
     let now = Instant::now();
     let writers: Vec<_> = (0..NUM_PARTITIONS)
         .map(|i| {
@@ -116,8 +109,6 @@ pub fn partition_file(
         })
         .collect::<Result<Vec<_>, IoError>>()?;
 
-    // Iterate over lines in parallel, hash them, and write (hash, offset) to the correct partition file.
-    // This avoids collecting all HashOffsets in memory.
     (0..newline_positions.len())
         .into_par_iter()
         .try_for_each(|i| -> Result<(), IoError> {
@@ -135,24 +126,46 @@ pub fn partition_file(
                 let offset = start as u64;
                 let partition_index = (hash % NUM_PARTITIONS) as usize;
 
-                // Lock the writer for the target partition and write the encoded data.
                 let mut writer_guard = writers[partition_index].lock().unwrap();
                 HashOffset(hash, offset).encode(&mut *writer_guard)?;
             }
             Ok(())
         })?;
-    emit_step_detail(app, progress_file_id, "Hashing and Writing Partitions", now.elapsed().as_millis());
+    emit_step_detail(
+        app,
+        progress_file_id,
+        "Hashing and Writing Partitions",
+        now.elapsed().as_millis(),
+    );
 
-    emit_step_detail(app, progress_file_id, "Total Partitioning Time", total_start.elapsed().as_millis());
-    Ok(())
+    emit_step_detail(
+        app,
+        progress_file_id,
+        "Total Partitioning Time",
+        total_start.elapsed().as_millis(),
+    );
+
+    if compare_config.ignore_line_number {
+        Ok(None)
+    } else {
+        let nl_path = output_dir.join("newline_positions.bin");
+        let mut nl_file = BufWriter::new(File::create(&nl_path)?);
+        let positions_bytes: &[u8] = unsafe {
+            std::slice::from_raw_parts(
+                newline_positions.as_ptr() as *const u8,
+                newline_positions.len() * size_of::<usize>(),
+            )
+        };
+        nl_file.write_all(positions_bytes)?;
+        Ok(Some(nl_path))
+    }
 }
-
-
 
 pub fn collect_unique_lines(
     app: &AppHandle,
     file_path: &str,
-    unique_offsets: &[(u64, usize)], // List of (offset, count)
+    unique_offsets: &[(u64, usize)],
+    newline_positions_path: Option<&PathBuf>,
     compare_config: &CompareConfig,
     file_id: &str,
 ) -> Result<(), IoError> {
@@ -167,12 +180,31 @@ pub fn collect_unique_lines(
     let mut sorted_unique_offsets = unique_offsets.to_vec();
     sorted_unique_offsets.sort_unstable_by_key(|k| k.0);
 
+    let nl_mmap_handle;
+    let mut nl_positions_slice: &[usize] = &[];
+
+    if !compare_config.ignore_line_number {
+        if let Some(path) = newline_positions_path {
+            let nl_file = File::open(path)?;
+            nl_mmap_handle = unsafe { Mmap::map(&nl_file)? };
+
+            if nl_mmap_handle.len() % size_of::<usize>() != 0 {
+                return Err(IoError::new(
+                    std::io::ErrorKind::InvalidData,
+                    "Newline position file has invalid size",
+                ));
+            }
+            nl_positions_slice = unsafe {
+                std::slice::from_raw_parts(
+                    nl_mmap_handle.as_ptr() as *const usize,
+                    nl_mmap_handle.len() / std::mem::size_of::<usize>()
+                )
+            };
+        }
+    }
+
     for (offset, count) in sorted_unique_offsets {
         let current_offset = offset as usize;
-
-        // Efficiently find the line number using a binary search on the newline positions.
-        // `partition_point` is faster than `binary_search` for this purpose.
-        // It finds the index of the first newline position greater than the current offset.
 
         let line_end = memchr::memchr(b'\n', &mmap[current_offset..])
             .map_or(mmap.len(), |pos| current_offset + pos);
@@ -185,19 +217,31 @@ pub fn collect_unique_lines(
         } else {
             line_str
         };
+        let mut line_number = 0;
+        if !compare_config.ignore_line_number {
+            line_number = nl_positions_slice
+                .binary_search(&current_offset)
+                .unwrap_or_else(|p| p)
+                + 1;
+        }
 
         if let Err(e) = app.emit(
             "unique_line",
             UniqueLinePayload {
                 file: file_id.to_string(),
                 text: display_line,
-                line_number: 0,
+                line_number,
             },
         ) {
             eprintln!("Failed to emit unique_line event: {}", e);
         }
     }
 
-    emit_step_detail(app, file_id, "Collecting Unique Lines", now.elapsed().as_millis());
+    emit_step_detail(
+        app,
+        file_id,
+        "Collecting Unique Lines",
+        now.elapsed().as_millis(),
+    );
     Ok(())
 }
