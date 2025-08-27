@@ -199,9 +199,6 @@ pub fn run_comparison(
 
     handle_collect_a.join().unwrap()?;
     handle_collect_b.join().unwrap()?;
-
-    fs::remove_dir_all(temp_dir)?;
-
     app.emit(
         "progress",
         ProgressPayload {
@@ -210,10 +207,17 @@ pub fn run_comparison(
             text: "Comparison Finished".to_string(),
         },
     )
-    .unwrap();
+        .unwrap();
     app.emit("comparison_finished", ComparisonFinishedPayload {})
         .unwrap();
-    println!("All done in {}ms.", start_time.elapsed().as_millis());
+    println!("All done in {}ms. Cleaning up temporary files in the background.", start_time.elapsed().as_millis());
 
+    // Move the cleanup to a background thread.
+    thread::spawn(move || {
+        if let Err(e) = fs::remove_dir_all(temp_dir) {
+            // Since we can't return the error, we should at least log it.
+            eprintln!("Failed to clean up temporary directory: {}", e);
+        }
+    });
     Ok(())
 }
