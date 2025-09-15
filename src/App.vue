@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import {ref, watch, computed} from "vue";
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from '@tauri-apps/api/event';
-import { open } from '@tauri-apps/plugin-dialog';
+import {computed, ref, watch} from "vue";
+import {invoke} from "@tauri-apps/api/core";
+import {listen} from '@tauri-apps/api/event';
+import {open} from '@tauri-apps/plugin-dialog';
+import {translations} from "./i18n.ts";
 
 const fileAPath = ref("");
 const fileBPath = ref("");
@@ -34,121 +35,6 @@ const comparisonDuration = ref<string | null>(null);
 
 const currentLanguage = ref('en');
 
-const translations = {
-  'en': {
-    title: "Large File Comparator",
-    selectFileA: "Select File A",
-    selectFileB: "Select File B",
-    noFileSelected: "No file selected",
-    useExternalSort: "Use external sort",
-    useExternalSortDesc: "Recommended if the file is larger than 5GB. This process will generate temporary index files on disk, which will be deleted after the comparison is complete.",
-    ignoreOccurences: "Ignore occurrences",
-    ignoreOccurencesDesc: "If a line appears multiple times in File A but only once in File B, and all other lines are identical, the files will be considered equal.",
-    useSingleThread: "Use single thread",
-    useSingleThreadDesc: "Processes File A first, then File B. Enabling this option may improve performance when memory is limited.",
-    ignoreLineNumber: "Ignore line number",
-    ignoreLineNumberDesc: "When displaying comparison results, line numbers will not be calculated. Enabling this can slightly improve processing speed.",
-    primaryKeyRegexLabel: "Primary Key Regex:",
-    primaryKeyRegexLabelDesc: "A regular expression to extract the primary key from each line.",
-    primaryKeyRegexPlaceholder: "e.g., ^(\\d+),",
-    startComparison: "Start Comparison",
-    comparing: "Comparing...",
-    fileAProgress: "File A Progress:",
-    fileBProgress: "File B Progress:",
-    comparisonTime: "Comparison Time:",
-    details: "Details",
-    detailsLog: "Details Log:",
-    uniqueInA: "Unique in File A",
-    uniqueInB: "Unique in File B",
-    lines: "lines",
-    seconds: "seconds"
-  },
-  'zh': {
-    title: "大文件比较器",
-    selectFileA: "选择文件A",
-    selectFileB: "选择文件B",
-    noFileSelected: "未选择文件",
-    useExternalSort: "使用外部排序",
-    useExternalSortDesc: "如果文件大于5G，建议开启此选项。比对过程中将产生一定磁盘写入，主要写入内容为索引，比对完成后删除。",
-    ignoreOccurences: "忽略出现次数",
-    ignoreOccurencesDesc: "若某行在文件A中出现多次，文件B中仅出现一次，两个文件其他行一样，比较结果为两文件相等。",
-    useSingleThread: "使用单线程",
-    useSingleThreadDesc: "先处理文件A再处理文件B，在内存较小时开启该选项会提升处理速度。",
-    ignoreLineNumber: "忽略行号",
-    ignoreLineNumberDesc: "展示比对结果时，不计算行号。开启该选项可少许提升处理速度。",
-    primaryKeyRegexLabel: "主键正则表达式:",
-    primaryKeyRegexLabelDesc: "主键正则表达式，用于从每行中提取主键。",
-    primaryKeyRegexPlaceholder: "例如, ^(\\d+),",
-    startComparison: "开始比较",
-    comparing: "比较中...",
-    fileAProgress: "文件A进度:",
-    fileBProgress: "文件B进度:",
-    comparisonTime: "比较用时:",
-    details: "详情",
-    detailsLog: "详细日志:",
-    uniqueInA: "文件A独有",
-    uniqueInB: "文件B独有",
-    lines: "行",
-    seconds: "秒"
-  },
-  'ja': {
-    title: "大きなファイルの比較",
-    selectFileA: "ファイルAを選択",
-    selectFileB: "ファイルBを選択",
-    noFileSelected: "ファイルが選択されていません",
-    useExternalSort: "外部ソートを使用",
-    useExternalSortDesc: "ファイルが5GBを超える場合は、このオプションを有効にすることをお勧めします。比較プロセス中にインデックスとしてディスク書き込みが発生しますが、比較完了後に削除されます。",
-    ignoreOccurences: "出現回数を無視",
-    ignoreOccurencesDesc: "ある行がファイルAに複数回出現し、ファイルBに1回だけ出現し、他のすべての行が同じである場合、比較結果は両ファイルが等しいと見なされます。",
-    useSingleThread: "シングルスレッドを使用",
-    useSingleThreadDesc: "最初にファイルAを処理し、次にファイルBを処理します。メモリが少ない場合にこのオプションを有効にすると、処理速度が向上することがあります。",
-    ignoreLineNumber: "行番号を無視",
-    ignoreLineNumberDesc: "比較結果を表示する際、行番号は計算されません。このオプションを有効にすると、処理速度がわずかに向上します。",
-    primaryKeyRegexLabel: "主キー正規表現:",
-    primaryKeyRegexLabelDesc: "各行から主キーを抽出するための正規表現。",
-    primaryKeyRegexPlaceholder: "例, ^(\\d+),",
-    startComparison: "比較を開始",
-    comparing: "比較中...",
-    fileAProgress: "ファイルAの進捗:",
-    fileBProgress: "ファイルBの進捗:",
-    comparisonTime: "比較時間:",
-    details: "詳細",
-    detailsLog: "詳細ログ:",
-    uniqueInA: "ファイルAのみ",
-    uniqueInB: "ファイルBのみ",
-    lines: "行",
-    seconds: "秒"
-  },
-  'ko': {
-    title: "대용량 파일 비교기",
-    selectFileA: "파일 A 선택",
-    selectFileB: "파일 B 선택",
-    noFileSelected: "선택된 파일 없음",
-    useExternalSort: "외부 정렬 사용",
-    useExternalSortDesc: "파일 크기가 5GB보다 큰 경우 이 옵션을 활성화하는 것이 좋습니다. 비교 과정에서 디스크에 임시 인덱스 파일이 생성되며, 비교가 완료된 후 삭제됩니다.",
-    ignoreOccurences: "발생 횟수 무시",
-    ignoreOccurencesDesc: "한 줄이 파일 A에 여러 번 나타나고 파일 B에는 한 번만 나타나며 다른 모든 줄이 동일한 경우, 두 파일은 동일한 것으로 간주됩니다.",
-    useSingleThread: "단일 스레드 사용",
-    useSingleThreadDesc: "파일 A를 먼저 처리한 다음 파일 B를 처리합니다. 메모리가 부족할 때 이 옵션을 활성화하면 처리 속도가 향상될 수 있습니다.",
-    ignoreLineNumber: "줄 번호 무시",
-    ignoreLineNumberDesc: "비교 결과를 표시할 때 줄 번호를 계산하지 않습니다. 이 옵션을 활성화하면 처리 속도를 약간 향상시킬 수 있습니다.",
-    primaryKeyRegexLabel: "기본 키 정규식:",
-    primaryKeyRegexLabelDesc: "각 줄에서 기본 키를 추출하기 위한 정규식입니다.",
-    primaryKeyRegexPlaceholder: "예, ^(\\d+),",
-    startComparison: "비교 시작",
-    comparing: "비교 중...",
-    fileAProgress: "파일 A 진행률:",
-    fileBProgress: "파일 B 진행률:",
-    comparisonTime: "비교 시간:",
-    details: "세부 정보",
-    detailsLog: "세부 로그:",
-    uniqueInA: "파일 A에만 있음",
-    uniqueInB: "파일 B에만 있음",
-    lines: "줄",
-    seconds: "초"
-  }
-}
-
 const t = computed(() => translations[currentLanguage.value as 'en' | 'zh' | 'ja' | 'ko']);
 
 async function selectFile(fileVar: 'A' | 'B') {
@@ -169,6 +55,10 @@ let startTime: number | null = null; // Variable to store the start time
 async function startComparison() {
   if (!fileAPath.value || !fileBPath.value) {
     alert("Please select both files.");
+    return;
+  }
+  if (primaryKeyRegexEnable.value && !primaryKeyRegex.value) {
+    alert("Please provide a primary key regex.");
     return;
   }
   comparisonStarted.value = true;
@@ -192,6 +82,11 @@ async function startComparison() {
     primaryKeyRegex: primaryKeyRegex.value
   });
 }
+
+async function exportResults() {
+
+}
+
 
 listen('progress', (event) => {
   const payload = event.payload as { percentage: number; file: string, text: string };
@@ -229,6 +124,60 @@ listen('comparison_finished', () => {
     startTime = null; // Reset start time
   }
 });
+
+const pkResults = computed(() => {
+  if (!primaryKeyRegexEnable.value || !primaryKeyRegex.value || !comparisonDuration.value) {
+    return null;
+  }
+
+  const regex = new RegExp(primaryKeyRegex.value);
+  const extractKey = (text: string): string | null => {
+    const match = text.match(regex);
+    return match ? (match[1] !== undefined ? match[1] : match[0]) : null;
+  };
+
+  const mapA = new Map<string, DiffLine>();
+  uniqueToA.value.forEach(line => {
+    const key = extractKey(line.text);
+    if (key !== null) {
+      mapA.set(key, line);
+    }
+  });
+
+  const mapB = new Map<string, DiffLine>();
+  uniqueToB.value.forEach(line => {
+    const key = extractKey(line.text);
+    if (key !== null) {
+      mapB.set(key, line);
+    }
+  });
+
+  const modified: { key: string, text_a: string, text_b: string, line_number_a: number, line_number_b: number }[] = [];
+  const missing: DiffLine[] = [];
+
+  for (const [key, lineA] of mapA.entries()) {
+    const lineB = mapB.get(key);
+    if (lineB) {
+      if (lineA.text !== lineB.text) {
+        modified.push({
+          key: key,
+          text_a: lineA.text,
+          line_number_a: lineA.line_number,
+          text_b: lineB.text,
+          line_number_b: lineB.line_number,
+        });
+      }
+      mapB.delete(key);
+    } else {
+      missing.push(lineA);
+    }
+  }
+
+  const added = Array.from(mapB.values());
+
+  return { modified, missing, added };
+});
+
 
 watch(primaryKeyRegexEnable, (newValue) => {
   if (!newValue) {
@@ -290,6 +239,7 @@ watch(primaryKeyRegexEnable, (newValue) => {
 
     <div v-if="comparisonDuration" class="comparison-time">
       <h3>{{ t.comparisonTime }} {{ comparisonDuration }} {{ t.seconds }}</h3>
+      <button @click="exportResults" :disabled="!comparisonDuration">{{ t.export }}</button>
     </div>
     <button @click="showDetails = !showDetails">{{ t.details }}</button>
     <div v-if="showDetails && stepDetails.length" class="details-log">
@@ -297,7 +247,7 @@ watch(primaryKeyRegexEnable, (newValue) => {
       <pre v-for="(step, index) in stepDetails" :key="index">{{ step.step }}: {{ step.duration_ms }} ms</pre>
     </div>
 
-    <div class="results-container">
+    <div v-if="!primaryKeyRegexEnable && comparisonDuration" class="results-container">
       <div class="result-pane">
         <h2>{{ t.uniqueInA }} ({{ uniqueToA.length }} {{ t.lines }})</h2>
         <div class="diff-output">
@@ -308,6 +258,33 @@ watch(primaryKeyRegexEnable, (newValue) => {
         <h2>{{ t.uniqueInB }} ({{ uniqueToB.length }} {{ t.lines }})</h2>
         <div class="diff-output">
           <pre v-for="line in uniqueToB" :key="line.line_number" class="diff-line added"><code><span class="line-number">{{ line.line_number }}</span>+ {{ line.text }}</code></pre>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="primaryKeyRegexEnable && pkResults" class="results-container-vertical">
+      <!-- Modified Data -->
+      <div class="result-pane">
+        <h2>{{ t.modifiedData }} ({{ pkResults.modified.length }} {{ t.lines }})</h2>
+        <div class="diff-output">
+          <div v-for="line in pkResults.modified" :key="line.key" class="modified-entry">
+            <pre class="diff-line removed"><code><span class="line-number">{{ line.line_number_a }}</span>- {{ line.text_a }}</code></pre>
+            <pre class="diff-line added"><code><span class="line-number">{{ line.line_number_b }}</span>+ {{ line.text_b }}</code></pre>
+          </div>
+        </div>
+      </div>
+      <!-- Missing Data -->
+      <div class="result-pane">
+        <h2>{{ t.missingData }} ({{ pkResults.missing.length }} {{ t.lines }})</h2>
+        <div class="diff-output">
+          <pre v-for="line in pkResults.missing" :key="line.line_number" class="diff-line removed"><code><span class="line-number">{{ line.line_number }}</span>- {{ line.text }}</code></pre>
+        </div>
+      </div>
+      <!-- Added Data -->
+      <div class="result-pane">
+        <h2>{{ t.addedData }} ({{ pkResults.added.length }} {{ t.lines }})</h2>
+        <div class="diff-output">
+          <pre v-for="line in pkResults.added" :key="line.line_number" class="diff-line added"><code><span class="line-number">{{ line.line_number }}</span>+ {{ line.text }}</code></pre>
         </div>
       </div>
     </div>
@@ -370,8 +347,10 @@ watch(primaryKeyRegexEnable, (newValue) => {
 }
 
 .container {
+  width: 100%;
   padding: 2rem;
   text-align: center;
+  box-sizing: border-box;
 }
 
 .file-selection {
@@ -484,5 +463,23 @@ textarea {
   text-align: right;
   margin-right: 1rem;
   user-select: none;
+}
+
+.results-container-vertical {
+  display: flex;
+  flex-direction: column;
+  margin-top: 2rem;
+  gap: 1rem;
+}
+
+.modified-entry {
+  border-bottom: 1px solid #ddd;
+  padding-bottom: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+.modified-entry:last-child {
+  border-bottom: none;
+  padding-bottom: 0;
+  margin-bottom: 0;
 }
 </style>

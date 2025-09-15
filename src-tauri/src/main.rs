@@ -55,10 +55,17 @@ async fn start_comparison(
     Ok(())
 }
 
+use std::fs;
+
+#[tauri::command]
+fn save_file(path: String, content: String) -> Result<(), String> {
+    fs::write(path, content).map_err(|err| err.to_string())
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![start_comparison])
+        .invoke_handler(tauri::generate_handler![start_comparison, save_file])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

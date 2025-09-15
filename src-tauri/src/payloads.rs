@@ -20,3 +20,15 @@ pub struct StepDetailPayload {
 
 #[derive(Clone, serde::Serialize)]
 pub struct ComparisonFinishedPayload {}
+
+#[derive(Clone, serde::Serialize)]
+pub struct DiffLine {
+    pub line_number: usize,
+    pub text: String,
+}
+
+#[derive(Clone, serde::Serialize)]
+pub struct ModifiedLine {
+    pub line_a: DiffLine,
+    pub line_b: DiffLine,
+}
