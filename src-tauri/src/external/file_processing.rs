@@ -10,7 +10,6 @@ use std::io::{BufWriter, Error as IoError, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Instant;
-use regex::bytes::Regex;
 use tauri::{AppHandle, Emitter};
 
 // Helper to emit step details to the frontend

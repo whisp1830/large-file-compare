@@ -1,10 +1,12 @@
 <script setup lang="ts">
-import {computed, ref, watch} from "vue";
+import {computed, onMounted, ref, watch} from "vue";
 import {invoke} from "@tauri-apps/api/core";
 import {listen} from '@tauri-apps/api/event';
 import {open} from '@tauri-apps/plugin-dialog';
 import {translations} from "./i18n.ts";
+import {load, Store} from '@tauri-apps/plugin-store';
 
+let store: Store
 const fileAPath = ref("");
 const fileBPath = ref("");
 const useExternalSort = ref(true);
@@ -13,6 +15,8 @@ const useSingleThread = ref(false);
 const ignoreLineNumber = ref(false);
 const primaryKeyRegexEnable = ref(false);
 const primaryKeyRegex = ref("");
+const excludeRegexEnable = ref(false);
+const excludeRegex = ref("");
 const progressA = ref(0);
 const progressB = ref(0);
 const progressText = ref("Starting...");
@@ -125,6 +129,32 @@ listen('comparison_finished', () => {
   }
 });
 
+const filteredUniqueToA = computed(() => {
+    if (excludeRegexEnable.value && excludeRegex.value) {
+        try {
+            const excludeRe = new RegExp(excludeRegex.value);
+            return uniqueToA.value.filter(line => !excludeRe.test(line.text));
+        } catch (e) {
+            console.error("Invalid exclude regex", e);
+            return uniqueToA.value;
+        }
+    }
+    return uniqueToA.value;
+});
+
+const filteredUniqueToB = computed(() => {
+    if (excludeRegexEnable.value && excludeRegex.value) {
+        try {
+            const excludeRe = new RegExp(excludeRegex.value);
+            return uniqueToB.value.filter(line => !excludeRe.test(line.text));
+        } catch (e) {
+            console.error("Invalid exclude regex", e);
+            return uniqueToB.value;
+        }
+    }
+    return uniqueToB.value;
+});
+
 const pkResults = computed(() => {
   if (!primaryKeyRegexEnable.value || !primaryKeyRegex.value || !comparisonDuration.value) {
     return null;
@@ -137,7 +167,7 @@ const pkResults = computed(() => {
   };
 
   const mapA = new Map<string, DiffLine>();
-  uniqueToA.value.forEach(line => {
+  filteredUniqueToA.value.forEach(line => {
     const key = extractKey(line.text);
     if (key !== null) {
       mapA.set(key, line);
@@ -145,7 +175,7 @@ const pkResults = computed(() => {
   });
 
   const mapB = new Map<string, DiffLine>();
-  uniqueToB.value.forEach(line => {
+  filteredUniqueToB.value.forEach(line => {
     const key = extractKey(line.text);
     if (key !== null) {
       mapB.set(key, line);
@@ -178,11 +208,48 @@ const pkResults = computed(() => {
   return { modified, missing, added };
 });
 
+onMounted(async () => {
+  store = await load('store.json');
+  useExternalSort.value = await store.get('useExternalSort') ?? useExternalSort.value;
+  ignoreOccurences.value = await store.get('ignoreOccurences') ?? ignoreOccurences.value;
+  useSingleThread.value = await store.get('useSingleThread') ?? useSingleThread.value;
+  ignoreLineNumber.value = await store.get('ignoreLineNumber') ?? ignoreLineNumber.value;
+  primaryKeyRegexEnable.value = await store.get('primaryKeyRegexEnable') ?? primaryKeyRegexEnable.value;
+  primaryKeyRegex.value = await store.get('primaryKeyRegex') ?? primaryKeyRegex.value;
+  excludeRegexEnable.value = await store.get('excludeRegexEnable') ?? excludeRegexEnable.value;
+  excludeRegex.value = await store.get('excludeRegex') ?? excludeRegex.value;
+  currentLanguage.value = await store.get('currentLanguage') ?? currentLanguage.value;
+  watch(primaryKeyRegexEnable, (newValue) => {
+    if (!newValue) {
+      primaryKeyRegex.value = "";
+    }
+    store.set('primaryKeyRegexEnable', newValue);
+    store.save();
+  });
 
-watch(primaryKeyRegexEnable, (newValue) => {
-  if (!newValue) {
-    primaryKeyRegex.value = "";
-  }
+  watch(primaryKeyRegex, (value) => {
+    store.set('primaryKeyRegex', value);
+    store.save();
+  });
+
+  watch(excludeRegexEnable, (newValue) => {
+    if (!newValue) {
+      excludeRegex.value = "";
+    }
+    store.set('excludeRegexEnable', newValue);
+    store.save();
+  });
+
+  watch(excludeRegex, (value) => {
+    store.set('excludeRegex', value);
+    store.save();
+  });
+
+  watch(useExternalSort, (value) => { store.set('useExternalSort', value).then(() => store.save()); });
+  watch(ignoreOccurences, (value) => { store.set('ignoreOccurences', value).then(() => store.save()); });
+  watch(useSingleThread, (value) => { store.set('useSingleThread', value).then(() => store.save()); });
+  watch(ignoreLineNumber, (value) => { store.set('ignoreLineNumber', value).then(() => store.save()); });
+  watch(currentLanguage, (value) => { store.set('currentLanguage', value).then(() => store.save()); });
 });
 
 </script>
@@ -223,6 +290,12 @@ watch(primaryKeyRegexEnable, (newValue) => {
       <label for="primaryKeyRegex" class="tooltip" :data-tooltip="t.primaryKeyRegexLabelDesc">{{ t.primaryKeyRegexLabel }}</label>
       <input type="text" id="primaryKeyRegex" v-show="primaryKeyRegexEnable"
              v-model="primaryKeyRegex" :placeholder="t.primaryKeyRegexPlaceholder" />
+    </div>
+    <div class="options-container">
+      <input type="checkbox" id="excludeRegexEnable" v-model="excludeRegexEnable" />
+      <label for="excludeRegexEnable" class="tooltip" :data-tooltip="t.excludeRegexLabelDesc">{{ t.excludeRegexLabel }}</label>
+      <input type="text" id="excludeRegex" v-show="excludeRegexEnable"
+             v-model="excludeRegex" :placeholder="t.excludeRegexPlaceholder" />
     </div>
 
     <button @click="startComparison" :disabled="comparisonStarted || !fileAPath || !fileBPath">
@@ -463,6 +536,24 @@ textarea {
   text-align: right;
   margin-right: 1rem;
   user-select: none;
+}
+
+.results-container-vertical {
+  display: flex;
+  flex-direction: column;
+  margin-top: 2rem;
+  gap: 1rem;
+}
+
+.modified-entry {
+  border-bottom: 1px solid #ddd;
+  padding-bottom: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+.modified-entry:last-child {
+  border-bottom: none;
+  padding-bottom: 0;
+  margin-bottom: 0;
 }
 
 .results-container-vertical {
