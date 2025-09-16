@@ -36,6 +36,10 @@ export const translations = {
         modifiedData: "Modified Data",
         missingData: "Missing Data",
         addedData: "Added Data",
+        manageHistory: "Manage History",
+        delete: "Delete",
+        primaryKeyRegexHistory: "Primary Key Regex History",
+        excludeRegexHistory: "Exclude Regex History",
     },
     'zh': {
         title: "大文件比较器",
@@ -74,6 +78,10 @@ export const translations = {
         modifiedData: "差异数据",
         missingData: "缺少数据",
         addedData: "新增数据",
+        manageHistory: "管理历史记录",
+        delete: "删除",
+        primaryKeyRegexHistory: "主键正则表达式历史",
+        excludeRegexHistory: "排除正则表达式历史",
     },
     'ja': {
         title: "大きなファイルの比較",
@@ -112,6 +120,10 @@ export const translations = {
         modifiedData: "差分データ",
         missingData: "欠損データ",
         addedData: "追加データ",
+        manageHistory: "履歴の管理",
+        delete: "削除",
+        primaryKeyRegexHistory: "主キー正規表現の履歴",
+        excludeRegexHistory: "除外正規表現の履歴",
     },
     'ko': {
         title: "대용량 파일 비교기",
@@ -150,5 +162,9 @@ export const translations = {
         modifiedData: "수정된 데이터",
         missingData: "누락된 데이터",
         addedData: "추가된 데이터",
+        manageHistory: "기록 관리",
+        delete: "삭제",
+        primaryKeyRegexHistory: "기본 키 정규식 기록",
+        excludeRegexHistory: "제외 정규식 기록",
     }
 }

@@ -17,6 +17,10 @@ const primaryKeyRegexEnable = ref(false);
 const primaryKeyRegex = ref("");
 const excludeRegexEnable = ref(false);
 const excludeRegex = ref("");
+const primaryKeyRegexHistory = ref<string[]>([]);
+const excludeRegexHistory = ref<string[]>([]);
+const showPkHistoryManagement = ref(false);
+const showExcludeHistoryManagement = ref(false);
 const progressA = ref(0);
 const progressB = ref(0);
 const progressText = ref("Starting...");
@@ -65,6 +69,14 @@ async function startComparison() {
     alert("Please provide a primary key regex.");
     return;
   }
+
+  if (primaryKeyRegexEnable.value && primaryKeyRegex.value) {
+    updateHistory('primaryKeyRegexHistory', primaryKeyRegex.value);
+  }
+  if (excludeRegexEnable.value && excludeRegex.value) {
+    updateHistory('excludeRegexHistory', excludeRegex.value);
+  }
+
   comparisonStarted.value = true;
   progressA.value = 0;
   progressB.value = 0;
@@ -89,6 +101,24 @@ async function startComparison() {
 
 async function exportResults() {
 
+}
+
+function updateHistory(historyKey: 'primaryKeyRegexHistory' | 'excludeRegexHistory', value: string) {
+  if (!value || value.trim() === '') return;
+
+  const historyRef = historyKey === 'primaryKeyRegexHistory' ? primaryKeyRegexHistory : excludeRegexHistory;
+
+  const newHistory = [value, ...historyRef.value.filter(item => item !== value)].slice(0, 10);
+  historyRef.value = newHistory;
+  store.set(historyKey, newHistory).then(() => store.save());
+}
+
+function deleteFromHistory(historyKey: 'primaryKeyRegexHistory' | 'excludeRegexHistory', valueToDelete: string) {
+  const historyRef = historyKey === 'primaryKeyRegexHistory' ? primaryKeyRegexHistory : excludeRegexHistory;
+
+  const newHistory = historyRef.value.filter(item => item !== valueToDelete);
+  historyRef.value = newHistory;
+  store.set(historyKey, newHistory).then(() => store.save());
 }
 
 
@@ -208,6 +238,27 @@ const pkResults = computed(() => {
   return { modified, missing, added };
 });
 
+const highlightPrimaryKey = (text: string) => {
+  if (!primaryKeyRegexEnable.value || !primaryKeyRegex.value) {
+    return text;
+  }
+  try {
+    const re = new RegExp(primaryKeyRegex.value);
+    const match = text.match(re);
+
+    if (!match) {
+      return text;
+    }
+    const keyToHighlight = match[1] !== undefined ? match[1] : match[0];
+    return text.replace(re, (fullMatch) => {
+      return fullMatch.replace(keyToHighlight, `<mark class="pk-highlight">${keyToHighlight}</mark>`);
+    });
+  } catch (e) {
+    console.error("Invalid regex for highlighting:", e);
+    return text;
+  }
+};
+
 onMounted(async () => {
   store = await load('store.json');
   useExternalSort.value = await store.get('useExternalSort') ?? useExternalSort.value;
@@ -219,6 +270,8 @@ onMounted(async () => {
   excludeRegexEnable.value = await store.get('excludeRegexEnable') ?? excludeRegexEnable.value;
   excludeRegex.value = await store.get('excludeRegex') ?? excludeRegex.value;
   currentLanguage.value = await store.get('currentLanguage') ?? currentLanguage.value;
+  primaryKeyRegexHistory.value = await store.get('primaryKeyRegexHistory') ?? [];
+  excludeRegexHistory.value = await store.get('excludeRegexHistory') ?? [];
   watch(primaryKeyRegexEnable, (newValue) => {
     if (!newValue) {
       primaryKeyRegex.value = "";
@@ -289,13 +342,39 @@ onMounted(async () => {
       <input type="checkbox" id="primaryKeyRegexEnable" v-model="primaryKeyRegexEnable" />
       <label for="primaryKeyRegex" class="tooltip" :data-tooltip="t.primaryKeyRegexLabelDesc">{{ t.primaryKeyRegexLabel }}</label>
       <input type="text" id="primaryKeyRegex" v-show="primaryKeyRegexEnable"
-             v-model="primaryKeyRegex" :placeholder="t.primaryKeyRegexPlaceholder" />
+             v-model="primaryKeyRegex" :placeholder="t.primaryKeyRegexPlaceholder" list="pk-history" />
+      <datalist id="pk-history">
+        <option v-for="item in primaryKeyRegexHistory" :key="item" :value="item" />
+      </datalist>
+      <button v-if="primaryKeyRegexEnable && primaryKeyRegexHistory.length > 0" @click="showPkHistoryManagement = !showPkHistoryManagement" class="manage-history-btn" :title="t.manageHistory">⚙️</button>
+    </div>
+    <div v-if="showPkHistoryManagement" class="history-management">
+      <h4>{{ t.primaryKeyRegexHistory }}</h4>
+      <ul>
+        <li v-for="item in primaryKeyRegexHistory" :key="item">
+          <span class="history-item-text" @click="primaryKeyRegex = item; showPkHistoryManagement = false;">{{ item }}</span>
+          <button @click="deleteFromHistory('primaryKeyRegexHistory', item)" class="delete-btn" :title="t.delete">❌</button>
+        </li>
+      </ul>
     </div>
     <div class="options-container">
       <input type="checkbox" id="excludeRegexEnable" v-model="excludeRegexEnable" />
       <label for="excludeRegexEnable" class="tooltip" :data-tooltip="t.excludeRegexLabelDesc">{{ t.excludeRegexLabel }}</label>
       <input type="text" id="excludeRegex" v-show="excludeRegexEnable"
-             v-model="excludeRegex" :placeholder="t.excludeRegexPlaceholder" />
+             v-model="excludeRegex" :placeholder="t.excludeRegexPlaceholder" list="exclude-history" />
+      <datalist id="exclude-history">
+        <option v-for="item in excludeRegexHistory" :key="item" :value="item" />
+      </datalist>
+      <button v-if="excludeRegexEnable && excludeRegexHistory.length > 0" @click="showExcludeHistoryManagement = !showExcludeHistoryManagement" class="manage-history-btn" :title="t.manageHistory">⚙️</button>
+    </div>
+    <div v-if="showExcludeHistoryManagement" class="history-management">
+      <h4>{{ t.excludeRegexHistory }}</h4>
+      <ul>
+        <li v-for="item in excludeRegexHistory" :key="item">
+          <span class="history-item-text" @click="excludeRegex = item; showExcludeHistoryManagement = false;">{{ item }}</span>
+          <button @click="deleteFromHistory('excludeRegexHistory', item)" class="delete-btn" :title="t.delete">❌</button>
+        </li>
+      </ul>
     </div>
 
     <button @click="startComparison" :disabled="comparisonStarted || !fileAPath || !fileBPath">
@@ -341,8 +420,8 @@ onMounted(async () => {
         <h2>{{ t.modifiedData }} ({{ pkResults.modified.length }} {{ t.lines }})</h2>
         <div class="diff-output">
           <div v-for="line in pkResults.modified" :key="line.key" class="modified-entry">
-            <pre class="diff-line removed"><code><span class="line-number">{{ line.line_number_a }}</span>- {{ line.text_a }}</code></pre>
-            <pre class="diff-line added"><code><span class="line-number">{{ line.line_number_b }}</span>+ {{ line.text_b }}</code></pre>
+            <pre class="diff-line removed"><code><span class="line-number">{{ line.line_number_a }}</span>- <span v-html="highlightPrimaryKey(line.text_a)"></span></code></pre>
+            <pre class="diff-line added"><code><span class="line-number">{{ line.line_number_b }}</span>+ <span v-html="highlightPrimaryKey(line.text_b)"></span></code></pre>
           </div>
         </div>
       </div>
@@ -350,14 +429,14 @@ onMounted(async () => {
       <div class="result-pane">
         <h2>{{ t.missingData }} ({{ pkResults.missing.length }} {{ t.lines }})</h2>
         <div class="diff-output">
-          <pre v-for="line in pkResults.missing" :key="line.line_number" class="diff-line removed"><code><span class="line-number">{{ line.line_number }}</span>- {{ line.text }}</code></pre>
+          <pre v-for="line in pkResults.missing" :key="line.line_number" class="diff-line removed"><code><span class="line-number">{{ line.line_number }}</span>- <span v-html="highlightPrimaryKey(line.text)"></span></code></pre>
         </div>
       </div>
       <!-- Added Data -->
       <div class="result-pane">
         <h2>{{ t.addedData }} ({{ pkResults.added.length }} {{ t.lines }})</h2>
         <div class="diff-output">
-          <pre v-for="line in pkResults.added" :key="line.line_number" class="diff-line added"><code><span class="line-number">{{ line.line_number }}</span>+ {{ line.text }}</code></pre>
+          <pre v-for="line in pkResults.added" :key="line.line_number" class="diff-line added"><code><span class="line-number">{{ line.line_number }}</span>+ <span v-html="highlightPrimaryKey(line.text)"></span></code></pre>
         </div>
       </div>
     </div>
@@ -572,5 +651,68 @@ textarea {
   border-bottom: none;
   padding-bottom: 0;
   margin-bottom: 0;
+}
+.diff-output :deep(mark.pk-highlight) {
+  background-color: #b3d7ff; /* light blue */
+  color: black;
+  border-radius: 3px;
+  font-weight: bold;
+  padding: 0 2px;
+}
+
+.manage-history-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 1.2rem;
+  padding: 0 5px;
+  line-height: 1;
+}
+.history-management {
+  max-width: 800px;
+  margin: 1rem auto;
+  padding: 1rem;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  background-color: #f9f9f9;
+  text-align: left;
+}
+.history-management h4 {
+  margin-top: 0;
+  text-align: center;
+}
+.history-management ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  max-height: 250px;
+  overflow-y: auto;
+}
+.history-management li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.5rem;
+  border-bottom: 1px solid #eee;
+}
+.history-management li:last-child {
+  border-bottom: none;
+}
+.history-item-text {
+  font-family: monospace;
+  margin-right: 1rem;
+  word-break: break-all;
+  cursor: pointer;
+}
+.history-item-text:hover {
+  color: #007bff;
+}
+.delete-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 1rem;
+  padding: 0;
+  line-height: 1;
 }
 </style>
