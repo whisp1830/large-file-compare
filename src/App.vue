@@ -2,8 +2,9 @@
 import {computed, onMounted, ref, watch} from "vue";
 import {invoke} from "@tauri-apps/api/core";
 import {listen} from '@tauri-apps/api/event';
-import {open} from '@tauri-apps/plugin-dialog';
+import {open, save, message} from '@tauri-apps/plugin-dialog';
 import {translations} from "./i18n.ts";
+import { writeTextFile } from '@tauri-apps/plugin-fs';
 import {load, Store} from '@tauri-apps/plugin-store';
 
 let store: Store
@@ -99,8 +100,82 @@ async function startComparison() {
   });
 }
 
-async function exportResults() {
+/**
+ * 通用的文件保存和写入函数。
+ * 替代了你之前的 downloadFile 函数。
+ */
+const saveAndWriteFile = async (defaultFilename: string, content: string, fileDescription: string) => {
+  if (!content) return;
 
+  try {
+    // 1. 弹出“另存为”对话框，让用户选择保存路径
+    const filePath = await save({
+      // 默认显示的文件名
+      defaultPath: defaultFilename,
+      // 设置文件过滤器
+      filters: [{
+        name: 'Text Files',
+        extensions: ['txt']
+      }]
+    });
+
+    // 如果用户取消了对话框 (filePath 为 null)
+    if (!filePath) {
+      console.log(`用户取消了 ${defaultFilename} 的保存操作。`);
+      return;
+    }
+
+    // 2. 将内容写入到用户选择的路径
+    await writeTextFile(filePath, content);
+
+    // 3. (可选) 提示用户保存成功
+    await message(`${fileDescription} 已成功导出到:\n${filePath}`, {
+      title: '导出成功',
+      kind: 'info'
+    });
+
+  } catch (error) {
+    console.error('文件写入或保存失败:', error);
+    await message(`${fileDescription} 导出失败: ${error}`, {
+      title: '导出失败',
+      kind: 'error'
+    });
+  }
+};
+
+async function exportResults() {
+  // 假设 pkResults.value, primaryKeyRegexEnable.value,
+  // filteredUniqueToA.value, fileAPath.value 等变量已在外部正确定义和赋值
+
+  if (primaryKeyRegexEnable.value && pkResults.value) {
+    const {modified, added, missing} = pkResults.value;
+
+    // 导出 Modified
+    const modifiedContent = modified.map(item =>
+        `Key: ${item.key}\n- ${item.line_number_a}: ${item.text_a}\n+ ${item.line_number_b}: ${item.text_b}`
+    ).join('\n---\n');
+    await saveAndWriteFile('diff.txt', modifiedContent, '修改内容');
+
+    // 导出 Added
+    const addedContent = added.map(item => `+ ${item.line_number}: ${item.text}`).join('\n');
+    await saveAndWriteFile('add.txt', addedContent, '新增内容');
+
+    // 导出 Missing
+    const missingContent = missing.map(item => `- ${item.line_number}: ${item.text}`).join('\n');
+    await saveAndWriteFile('miss.txt', missingContent, '缺失内容');
+
+  } else if (!primaryKeyRegexEnable.value && comparisonDuration.value) {
+
+    // 导出 Unique to A
+    const uniqueAContent = filteredUniqueToA.value.map(line => `- ${line.line_number}: ${line.text}`).join('\n');
+    const fileAName = fileAPath.value.split(/[\\/]/).pop() || 'A';
+    await saveAndWriteFile(`unique_in_${fileAName}.txt`, uniqueAContent, `${fileAName} 独有内容`);
+
+    // 导出 Unique to B
+    const uniqueBContent = filteredUniqueToB.value.map(line => `+ ${line.line_number}: ${line.text}`).join('\n');
+    const fileBName = fileBPath.value.split(/[\\/]/).pop() || 'B';
+    await saveAndWriteFile(`unique_in_${fileBName}.txt`, uniqueBContent, `${fileBName} 独有内容`);
+  }
 }
 
 function updateHistory(historyKey: 'primaryKeyRegexHistory' | 'excludeRegexHistory', value: string) {
